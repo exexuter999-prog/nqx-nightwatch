@@ -1,5 +1,10 @@
 # CLAUDE.md — R43 structural-edge autonomous execution contract
 
+> このファイルは**監視 PC 上の Claude Code セッション**向けの運用契約で、ここのコマンドは本番の発注・
+> Cloudflare・Telegram に直結する。Devin など外部エージェントはこのファイルを自動で Knowledge として
+> 取り込むが、**§0 / §6 の手順を実行してはならない**。外部エージェントの制約は `AGENTS.md` 冒頭と
+> `docs/DEVIN_TASKS.md` §1(2026-09-15)。
+
 ## 0. セッション開始
 
 1. `TRADING_CONTEXT.md` を読む。

@@ -1,5 +1,16 @@
 # AGENTS.md — R43 structural-edge autonomous execution contract
 
+> ## 外部エージェント(Devin / Codex)への前置き(2026-09-15)
+>
+> Devin はリポジトリの `CLAUDE.md` と `AGENTS.md` を自動で Knowledge として取り込む。**この 2 つの
+> ファイルは監視 PC 上で動く運用契約であり、ここに書かれたコマンド(`nqx_cycle.py` / `order.py` /
+> `autotrade_engine.py` / `tv_fetch.py` / `telegram_bot.py` / `nqx_state.py` / `autotrade_arm.py` /
+> `wrangler deploy` など)は本番の発注・Cloudflare・Telegram に直結する。外部エージェントはこれらを
+> 実行しない。** 外部エージェントが従う制約の正本は `docs/DEVIN_TASKS.md` §1 で、要点は:
+> 本番コマンドを叩かない / `.secrets/` を作らない・読まない / テストは `python tests/run_all.py` だけ /
+> 振る舞いの変更は `execution_contract.json` のスイッチの裏で既定 OFF / 推測で埋めない / 1 PR 1 タスク。
+> 以下の本文は運用契約の写し(正本は `CLAUDE.md`)で、読むのは構造を理解するためだけ。
+
 ## 0. セッション開始
 
 1. `TRADING_CONTEXT.md` を読む。

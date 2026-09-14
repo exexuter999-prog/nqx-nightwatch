@@ -69,6 +69,20 @@ python nqx_state.py --check
 §1 は全タスク共通の禁止事項。Devin のセッションごとに繰り返し書かなくてよいように
 Knowledge(常時読み込まれる文)へ登録する。各タスクのプロンプトは §1 が読まれている前提で短くしてある。
 
+登録場所(Devin 公式ドキュメント、2026-09-15 確認): Devin の Web アプリで **Settings → Resources →
+Knowledge** を開き、右上の **Create knowledge**。項目は次のとおり。
+- **Trigger Description**(必須。Devin はこれを見て思い出すかを決める): 「nqx-nightwatch リポジトリでの
+  すべての作業。コマンド実行・テスト・PR 作成の前に必ず読む」のように「常に」を明示する。
+- **Content**: §1 の ```text``` ブロックの中身をそのまま。
+- **Pinned repos**: `exexuter999-prog/nqx-nightwatch` を選ぶ(そのリポのセッションで必ず読まれる)。
+- Folder / Macro(`!name` で呼べる短縮名)は任意。
+
+**注意: Devin はリポジトリの `CLAUDE.md` と `AGENTS.md` を自動で Knowledge に取り込む。** どちらも
+監視 PC の運用契約で、本番の発注コマンドが手順として書かれている。そのため両ファイルの冒頭に
+「外部エージェントはこの手順を実行しない」という前置きを入れた(2026-09-15)。Knowledge の自動生成分は
+Settings → Resources → Knowledge に並ぶので、最初のセッションの前に一度眺めて、運用手順が
+「やること」として取り込まれていたら無効化する。
+
 ### 0.3 監査コーパスの匿名化エクスポート(タスク B の前提)
 
 `.secrets/monitor_cycle_*.json`(1,228 本)は Devin に見せられない場所にある。タスク B-0 で Devin に
@@ -352,9 +366,10 @@ Mini App の再ビルドと配置だけ」と明記する。
    「参照するテストが 0 件」のスイッチを列挙して exit 1。
    tests/test_r95_switchboard.py で --check を回し、現状の未整備スイッチは allowlist に入れて
    PR 本文に列挙する(直すのは別 PR)。
-2. AGENTS.md: 冒頭 10 行で「運用契約の正本は CLAUDE.md。ここは Codex 向けの入口で、
-   以下は CLAUDE.md と同一でなければならない」と宣言し、本文は CLAUDE.md と byte 同一にする。
-   tests/test_r95_agents_sync.py で AGENTS.md の宣言部以降と CLAUDE.md が一致することを検査する。
+2. AGENTS.md: 冒頭の「外部エージェントへの前置き」ブロック(2026-09-15 に追加。Devin が AGENTS.md を
+   自動で Knowledge に取り込むための安全弁なので**必ず残す**)の直後に「運用契約の正本は CLAUDE.md。
+   以下は CLAUDE.md と同一でなければならない」と宣言し、本文は CLAUDE.md(その冒頭の注記を除く)と
+   byte 同一にする。tests/test_r95_agents_sync.py で宣言部以降の一致を検査する。
 3. CLAUDE.md の中で契約値を直書きしている箇所(allowedGrades、pyramid の enabled/dryRun、
    entryDepth.mode、modelGate、stopLogic の各 mode、fillWatch.autostart)を拾い、
    契約ファイルの現在値と食い違っていれば --check で WARN に出す(CLAUDE.md は直さない。
