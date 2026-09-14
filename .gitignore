@@ -1,0 +1,39 @@
+# 秘密と台帳(ここに入るものは全部本番の状態)
+.secrets/
+*.env
+*.env.bak*
+
+# 依存とビルド生成物
+node_modules/
+dist/
+__pycache__/
+*.pyc
+
+# ルートに落ちるランタイム JSON(tv_fetch / tv_snapshot が毎周期上書きする)
+/bars*.json
+/chart_state*.json
+/study_*.json
+/pine_labels.json
+/quote.json
+/cvd_table.json
+/smt_lines.json
+/smt_labels.json
+/pane_layout.json
+
+# 大きい・Devin に不要
+animated-web/
+archive/
+artifacts/
+nqx-upload/
+preview/
+
+# 設定のバックアップ(wrangler.toml.bak-* など)
+*.bak
+*.bak-*
+
+# wrangler のローカル状態(miniflare の DO/observability sqlite。本番ではないがサイズ大・端末固有)
+.wrangler/
+
+# Claude Code の端末固有ファイル(launch.json は残す)
+.claude/settings.local.json
+.claude/*.lock

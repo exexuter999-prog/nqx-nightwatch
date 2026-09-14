@@ -1,0 +1,124 @@
+//@version=5
+indicator("CVD Session Oscillator", shorttitle="CVD-SO", overlay=false, precision=0)
+
+// ═══════════════════════════════════════════════════════════
+// CVD Session Oscillator
+//   - 下位足1分の buy/sell volume から CVD を積算
+//   - セッション(または指定本数)でリセット
+//   - EMA 2本のクロスをマーカー表示
+//   - 価格 vs CVD のダイバージェンス検出(フラクタル)
+// ═══════════════════════════════════════════════════════════
+
+// ---------- Inputs ----------
+grpC = "CVD 計算"
+ltf        = input.timeframe("1",  "下位足 (Lower Timeframe)", group=grpC)
+resetMode  = input.string("Session", "累積のリセット", options=["Session", "Periodic"], group=grpC)
+cvdPeriod  = input.int(39, "Periodic時の本数", minval=2, group=grpC,
+                       tooltip="Periodic選択時のローリング本数。10分足39本 ≈ NYセッション6.5時間")
+
+grpE = "EMA クロス"
+emaFastLen = input.int(20, "EMA 短期", minval=1, group=grpE)
+emaSlowLen = input.int(50, "EMA 長期", minval=1, group=grpE)
+showCross  = input.bool(true, "クロスマーカーを表示", group=grpE)
+
+grpD = "ダイバージェンス"
+showDiv    = input.bool(true,  "ダイバージェンスを表示", group=grpD)
+fractalLen = input.int(5, "フラクタル期間", minval=1, group=grpD,
+                       tooltip="大きいほどシグナルが減り確度が上がる。2は乱発するので非推奨")
+
+grpS = "表示"
+colUp      = input.color(color.new(#26a69a, 0), "上昇色", group=grpS)
+colDn      = input.color(color.new(#ef5350, 0), "下降色", group=grpS)
+showLabels = input.bool(false, "数値ラベル", group=grpS)
+
+// ---------- 下位足から buy/sell volume を取得 ----------
+f_ltfDelta() =>
+    // 各下位足バーで、終値>始値なら買い優勢、逆なら売り優勢
+    // 同値の場合は中立(0)
+    d = close > open ? volume : close < open ? -volume : 0.0
+    d
+
+ltfDelta = request.security_lower_tf(syminfo.tickerid, ltf, f_ltfDelta())
+
+// 現在バー内の下位足デルタを合計
+barDelta = 0.0
+if array.size(ltfDelta) > 0
+    for i = 0 to array.size(ltfDelta) - 1
+        barDelta += array.get(ltfDelta, i)
+
+// ---------- CVD 積算 ----------
+isNewSession = ta.change(time("D")) != 0
+
+var float cvd = 0.0
+if resetMode == "Session"
+    cvd := isNewSession ? barDelta : cvd + barDelta
+else
+    cvd := math.sum(barDelta, cvdPeriod)
+
+// ---------- EMA ----------
+emaFast = ta.ema(cvd, emaFastLen)
+emaSlow = ta.ema(cvd, emaSlowLen)
+
+goldenCross = ta.crossover(emaFast, emaSlow)
+deathCross  = ta.crossunder(emaFast, emaSlow)
+
+// ---------- 描画: ヒストグラム ----------
+histCol = cvd >= 0 ? colUp : colDn
+plot(cvd, "CVD", color=histCol, style=plot.style_columns, linewidth=1)
+plot(emaFast, "EMA Fast", color=color.new(#00e5b0, 0), linewidth=2)
+plot(emaSlow, "EMA Slow", color=color.new(#7e57c2, 0), linewidth=2)
+hline(0, "Zero", color=color.new(color.gray, 50), linestyle=hline.style_dotted)
+
+// ---------- EMA クロスマーカー ----------
+plotshape(showCross and goldenCross, "GC", shape.triangleup,
+          location.bottom, color=color.new(#00e5b0, 0), size=size.tiny)
+plotshape(showCross and deathCross, "DC", shape.triangledown,
+          location.top, color=color.new(#7e57c2, 0), size=size.tiny)
+
+// ---------- ダイバージェンス検出 ----------
+// フラクタルでピボットを取り、価格とCVDの方向が逆なら乖離
+ph = ta.pivothigh(high, fractalLen, fractalLen)
+pl = ta.pivotlow(low,  fractalLen, fractalLen)
+
+var float prevPH      = na
+var float prevPHcvd   = na
+var float prevPL      = na
+var float prevPLcvd   = na
+
+bearDiv = false
+bullDiv = false
+
+if not na(ph)
+    curCvd = cvd[fractalLen]
+    if not na(prevPH)
+        // 価格は高値切り上げ、CVDは切り下げ → 弱気ダイバージェンス
+        bearDiv := ph > prevPH and curCvd < prevPHcvd
+    prevPH    := ph
+    prevPHcvd := curCvd
+
+if not na(pl)
+    curCvd = cvd[fractalLen]
+    if not na(prevPL)
+        // 価格は安値切り下げ、CVDは切り上げ → 強気ダイバージェンス
+        bullDiv := pl < prevPL and curCvd > prevPLcvd
+    prevPL    := pl
+    prevPLcvd := curCvd
+
+plotshape(showDiv and bearDiv, "BearDiv", shape.labeldown,
+          location.top, color=color.new(colDn, 20),
+          text="D", textcolor=color.white, size=size.tiny, offset=-fractalLen)
+plotshape(showDiv and bullDiv, "BullDiv", shape.labelup,
+          location.bottom, color=color.new(colUp, 20),
+          text="D", textcolor=color.white, size=size.tiny, offset=-fractalLen)
+
+// ---------- 数値ラベル ----------
+if showLabels and barstate.islast
+    label.new(bar_index, cvd, str.tostring(cvd, "#"),
+              color=color.new(color.black, 30), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+// ---------- アラート ----------
+alertcondition(goldenCross, "CVD EMA ゴールデンクロス", "CVD EMA GC")
+alertcondition(deathCross,  "CVD EMA デッドクロス",     "CVD EMA DC")
+alertcondition(bullDiv,     "強気ダイバージェンス",       "CVD Bullish Divergence")
+alertcondition(bearDiv,     "弱気ダイバージェンス",       "CVD Bearish Divergence")

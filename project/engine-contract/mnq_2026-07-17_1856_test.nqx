@@ -1,0 +1,8 @@
+!NQX/1
+D|QML=28554.75|AL=28722|LH=28767.75|S2=28805|MOMR=28887.375|MID=28911.5|PDL=29079|AH=29220|S1=29249|WM=29308.625|PDM=29438|NYH=29532|PP=29523|MM=29555.25|TC=29608
+M|sy=MNQ1!|tf=1D/3M/15M/45M|at=2026-07-17 18:56 JST|ss=CME|sf=1D,3M,15M,45M|dq=M|qr=4枚は18:56:30から18:57:42の逐次取得で価格が非同期|px=28697.25|ps=1D:28695.00,3M:28693.75,15M:28697.25,45M:28706.00|un=画像間最大12.25ptの時刻差;イベント時刻と正確なATRはMISSING|ht=1Dは31100.5高値後のlower-high構造から$QMLへ再接近;45Mと15Mは下降継続;3Mのみ$QML反発中|rg=TR|vo=EX|mo=BEAR|qm=H|ds=I|na=rm,sn,pe,br,pp,ui,bp,ge,cm,ne,ce,sz|mr=スクリーンショット観測のみ;Pressure Scoreは確率ではない
+C|ac=$QML直上で売り優勢の下降auctionだが支持反応中|al=下降継続と主要安値反発の境界|lm=上方:$AL,$LH,$S2,$MOMR,$MID,$PDL;下方:$QML|pm=OBSERVED:3M/15M/45MすべてREG BEAR;INFERRED:$QML近辺でshort-coverと買い反応|bu=$QML維持後に$ALを3M/15M終値で回復し$LHへ受容|be=$QML割れを確定し戻りが$QML下で拒否される|ba=$QML..$AL内で往復し方向トリガー不成立|dh=HTF下降優位だが現在位置では新規shortの非対称性が悪い|de=3Mのcyan反発帯と1D/週/月共通安値$QML|ci=支持直上を追わず、$QML割れ後の戻り拒否か$AL回復後の保持を待つ
+Z|dz=$QML..$AL|s=$QML|r=$AL,$LH,$S2,$MOMR,$MID,$PDL,$AH,$S1,$WM,$PDM,$PP..$NYH,$MM,$TC|qml=$QML|la=$AL,$LH,$S2,$MOMR,$MID,$PDL|lb=$QML|tm=$QMLは1D/Weekly/Monthly共通安値;3M反発中だが15M/45MはREG BEAR;上は$ALから$MIDまで段階抵抗
+E|ev=MISSING|src=UNVERIFIED|rule=イベント時刻を推定しない;確認できるまでイベント起因の新規entryを認めない
+O|c=MISSING
+G|n=0|ip=^WAIT($QML..$AL,$AL,$QML)|mx=NOT REQUIRED|io=NOT REQUIRED|nt=3M/15M/45MはREG BEARだがインジケータ表がNO TARGET・NO TRADE。$QML直上でshort追撃と反転longの双方に確定トリガーがない|nr=$QML下の確定受容後リテスト拒否、または$AL上の3M/15M受容と保持|rn=Pressure Score 72/55/48は確率ではない。読めないtarget、勝率、EV、eventを捏造しない

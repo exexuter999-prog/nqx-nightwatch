@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>NQX // Nightwatch — Telegram runtime harness (dev only)</title>
+  <!--
+    開発専用のハーネス。Telegram.WebApp を差し替えて、CONFIRM & SEND ORDER の
+    挙動(有効化条件・押下時 disable・sendData payload)をブラウザで検証する。
+
+    ★ sendData は本物ではない。window.__sentData に貯めるだけで、Telegram にも
+      Bot にも CrossTrade にも到達しない。
+    ★ vite build の入力は index.html だけなので、このファイルは配布物に入らない。
+  -->
+  <script type="importmap">
+    {"imports":{"three":"https://esm.sh/three@0.180.0","gsap":"https://esm.sh/gsap@3.13.0","postprocessing":"https://esm.sh/postprocessing@6.37.8"}}
+  </script>
+  <script>
+    window.__sentData = [];
+    window.Telegram = {
+      WebApp: {
+        platform: "android",
+        initData: "",
+        viewportStableHeight: window.innerHeight,
+        contentSafeAreaInset: { top: 0, bottom: 0 },
+        safeAreaInset: { top: 0, bottom: 0 },
+        ready() {},
+        expand() {},
+        onEvent() {},
+        offEvent() {},
+        disableVerticalSwipes() {},
+        enableVerticalSwipes() {},
+        setBackgroundColor() {},
+        setHeaderColor() {},
+        HapticFeedback: { impactOccurred() {}, notificationOccurred() {} },
+        sendData(payload) { window.__sentData.push(payload); },
+      },
+    };
+  </script>
+</head>
+<body>
+  <script type="module">
+    // index.html の <head> のリンクと本文をそのまま使う。
+    // 手で複製すると、スタイルを1枚足しただけでハーネスが実物と乖離する。
+    const html = await (await fetch("./index.html", { cache: "no-store" })).text();
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+
+    const loaded = [];
+    parsed.head.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
+      const node = document.createElement("link");
+      node.rel = "stylesheet";
+      node.href = link.getAttribute("href");
+      loaded.push(new Promise((resolve) => { node.onload = node.onerror = resolve; }));
+      document.head.append(node);
+    });
+    await Promise.all(loaded);
+
+    document.body.innerHTML = parsed.body.innerHTML;
+    document.body.querySelectorAll("script").forEach((node) => node.remove());
+    await import("./app.js");
+  </script>
+</body>
+</html>

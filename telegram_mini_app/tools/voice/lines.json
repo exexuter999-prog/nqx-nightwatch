@@ -1,0 +1,11 @@
+{
+  "_comment": "音声キューの台本(正本)。sound.js の CUE_TEXT と一字一句同じにすること(テストで突き合わせる)。キーは public/voice の WAV 名。",
+  "scenario-armed": "Armed. Stand by.",
+  "order-sent": "Manual fire.",
+  "auto-order-sent": "Auto deployed.",
+  "order-filled": "Executed.",
+  "tp1-filled": "One down.",
+  "position-closed-win": "Gain secured.",
+  "position-closed-loss": "Cut loose.",
+  "sound-on": "Comms active."
+}

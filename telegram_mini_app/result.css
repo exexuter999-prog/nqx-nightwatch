@@ -1,0 +1,259 @@
+/* NQX RESULT — 決済結果画面のスタイル。
+ *
+ * 出所: files0814/nqx-result-display.html。値は原本のまま。
+ * 統合にあたって変えたのは次だけ。
+ *
+ *   1. すべてのセレクタを #resultView の内側に閉じた
+ *   2. `:root` の変数定義を #resultView に移した
+ *      → 既存 styles.css の --bone / --mono と名前が衝突するため。
+ *        :root に置くとコンソール画面の配色とフォントが変わってしまう
+ *   3. `html, body` への指定を削除(アプリ全体を乗っ取らないため)
+ *   4. `body.psy` を #resultView.psy に(JS 側も同じ要素にクラスを付ける)
+ *   5. レビューハーネス用の .dev ブロックを削除
+ *   6. 画面を閉じるための #result-bar / [hidden] を追加
+ */
+
+#resultView {
+  --void:#050608; --bone:#E9E4D6; --ash:#6E7178;
+  --win:#FF3B4F; --loss:#C96A4D; --flat:#8C93A0;
+  --c:var(--win); --glow:.55;
+  /* 角丸トークン(2026-08-16 丸型リスキン。スコープ内自己完結) */
+  --r-pill:999px; --r-chip:6px;
+  --mono:ui-monospace,'SF Mono',Menlo,'Courier New',monospace;
+  --grot:'Archivo',system-ui,-apple-system,sans-serif;
+  --black:'UnifrakturCook',Georgia,serif;
+  /* Telegram.WebApp から実行時に上書きされる。以下はブラウザ用フォールバック */
+  --vh:100dvh;
+  --pad-top:env(safe-area-inset-top,0px);
+  --pad-bot:env(safe-area-inset-bottom,0px);
+
+  position:fixed; inset:0; z-index:60;
+  background:var(--void);
+  font-family:var(--mono); color:var(--bone);
+  -webkit-font-smoothing:antialiased;
+  -webkit-user-select:none; user-select:none;
+  overscroll-behavior:none;
+}
+#resultView[hidden]{ display:none }
+#resultView *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+
+#resultView .card{
+  position:relative;width:100%;height:var(--vh);
+  background:var(--void);overflow:hidden;isolation:isolate;
+}
+#resultView #hero{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+/* Type 2 用の表面 — 網点、紙の目、グレード。
+   GPU が合成するのでアニメーション 1 フレームあたりの費用はゼロ。 */
+#resultView .surface{position:absolute;inset:0;z-index:1;pointer-events:none;opacity:0}
+#resultView.psy .surface{opacity:1}
+#resultView .surface i{position:absolute;inset:0;display:block}
+#resultView .surface .screen{
+  background-image:radial-gradient(circle at 50% 50%, #000 34%, transparent 36%);
+  background-size:5.4px 5.4px;mix-blend-mode:multiply;opacity:.17;
+}
+#resultView .surface .tooth{
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode:overlay;opacity:.13;
+}
+#resultView .surface .grade{
+  background:radial-gradient(78% 42% at 50% 24.5%,
+    rgba(0,0,0,0) 18%, rgba(4,1,10,.12) 55%, rgba(4,1,10,.52) 100%);
+}
+
+/* 軌跡は滲ませる。ただし文字が始まる前に必ず殺す(HANDOFF §11-2) */
+#resultView .scrim{
+  position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:linear-gradient(to bottom,
+    rgb(from var(--void) r g b / 0) 0%,   rgb(from var(--void) r g b / 0) 38%,
+    rgb(from var(--void) r g b / .60) 50%, rgb(from var(--void) r g b / .93) 58%,
+    var(--void) 65%);
+}
+#resultView .card::after{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:3;
+  background:
+    radial-gradient(120% 88% at 50% 40%,
+      rgba(0,0,0,0) 38%, rgba(0,0,0,.5) 78%, rgba(0,0,0,.88) 100%);
+  mix-blend-mode:multiply;
+}
+
+#resultView .ui{
+  position:relative;z-index:4;height:100%;
+  display:flex;flex-direction:column;
+  padding:calc(var(--pad-top) + clamp(16px,4vw,26px))
+          clamp(18px,4.6vw,30px)
+          calc(var(--pad-bot) + clamp(16px,4vw,26px));
+  /* R57: 内容が画面より高いときは縦スクロール。flex に子を潰させない(数字が隠れた原因)。 */
+  overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+}
+#resultView .ui::-webkit-scrollbar{display:none}
+#resultView .ui > *{flex-shrink:0}
+/* 根拠チャートは画面高さの 8%〜38% + 時刻ラベル。プレートはその下から始める。 */
+#resultView .ui > .spacer{flex:1 0 auto;min-height:calc(var(--vh) * .40 - var(--pad-top))}
+#resultView .eyebrow{
+  position:relative;z-index:1;
+  text-shadow:0 0 14px rgba(4,2,10,.95),0 0 30px rgba(4,2,10,.8);
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:clamp(8px,2.1vw,11px);letter-spacing:.34em;
+  color:var(--ash);text-transform:uppercase;
+}
+#resultView .eyebrow .mark{color:var(--bone);font-weight:700}
+#resultView .eyebrow .mark i{color:var(--ash);font-style:normal}
+#resultView .eyebrow .stamp{border:1px solid rgba(233,228,214,.26);padding:3px 7px 2px;font-size:.86em;letter-spacing:.24em;border-radius:var(--r-chip)}
+#resultView .spacer{flex:1;min-height:24vh}
+
+/* ═══ R57: 結果プレート ═══
+   丸いピルは、計測行が増えた画面で flex に押し潰され数字が隠れた(2026-09-05 実測)。
+   プレートは flex-shrink:0 で高さを守り、金額 + 内訳 + R リングを 1 枚に収める。
+   金額が唯一の大声(HANDOFF §11-3)。リングは計画 R に対する実現 R。 */
+#resultView .plate{
+  position:relative;flex-shrink:0;
+  display:flex;align-items:center;gap:clamp(10px,3vw,18px);
+  padding:clamp(10px,2.8vw,16px) clamp(12px,3.4vw,20px);
+  border:1px solid rgb(from var(--c) r g b / .42);border-radius:18px;
+  background:linear-gradient(160deg, rgba(5,6,8,.78), rgba(5,6,8,.46));
+  box-shadow:0 0 54px -14px rgb(from var(--c) r g b / var(--glow)), inset 0 1px 0 rgba(255,255,255,.06);
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+}
+@supports not (color:rgb(from #fff r g b / 50%)){ #resultView .plate{border-color:var(--c);box-shadow:none} }
+#resultView .plate-main{flex:1 1 auto;min-width:0}
+#resultView .amount{
+  position:relative;color:var(--c);
+  font-family:var(--grot);font-weight:700;
+  font-size:clamp(34px,10.2vw,58px);line-height:1;
+  letter-spacing:-.035em;font-variant-numeric:tabular-nums;
+  text-shadow:0 0 22px rgb(from var(--c) r g b / .45);
+  white-space:nowrap;
+}
+#resultView .amount.stamp{animation:rp-stamp .5s cubic-bezier(.2,1.5,.3,1) both}
+@keyframes rp-stamp{from{transform:scale(1.12);opacity:0}to{transform:scale(1);opacity:1}}
+#resultView .ring{flex:0 0 auto;width:clamp(58px,17vw,84px);height:clamp(58px,17vw,84px)}
+#resultView .ring[hidden]{display:none}
+#resultView .ring .track{fill:none;stroke:rgba(236,233,223,.16);stroke-width:7}
+#resultView .ring .plan{fill:none;stroke:rgba(61,214,140,.38);stroke-width:7;stroke-linecap:round}
+#resultView .ring .real{fill:none;stroke:var(--c);stroke-width:8;stroke-linecap:round;
+  filter:drop-shadow(0 0 5px rgb(from var(--c) r g b / .6))}
+#resultView .ring .r{fill:var(--bone);font-family:var(--grot);font-weight:700;font-size:24px;text-anchor:middle}
+#resultView .ring .p{fill:var(--ash);font-family:var(--mono);font-size:10px;text-anchor:middle;letter-spacing:.04em}
+
+#resultView .sub{margin-top:clamp(6px,1.8vw,10px);font-size:clamp(9px,2.4vw,12px);letter-spacing:.16em;color:var(--ash);
+  overflow-wrap:anywhere}
+#resultView .sub b{color:var(--bone);font-weight:400}
+#resultView .verdict{
+  font-family:var(--black);font-weight:700;
+  font-size:clamp(22px,6.6vw,36px);line-height:1.03;
+  margin-top:clamp(14px,3.4vw,20px);color:var(--bone);max-width:14ch;
+}
+/* R57: 根拠(モデル・等級のプレートと、根拠タグ / 減点のチップ)。ピルより静かに。 */
+#resultView .rationale{
+  margin-top:clamp(10px,2.6vw,14px);display:flex;flex-wrap:wrap;gap:5px 6px;align-items:center;
+}
+#resultView .rationale[hidden]{display:none}
+#resultView .rationale .modelplate{
+  font-size:clamp(9px,2.4vw,11px);letter-spacing:.22em;color:var(--bone);
+  padding:4px 9px 3px;border:1px solid rgba(233,228,214,.34);border-radius:var(--r-chip);
+  background:rgba(5,6,8,.55);
+}
+#resultView .rationale .modelplate i{font-style:normal;color:var(--c)}
+#resultView .rationale .chip{
+  font-size:clamp(8px,2.1vw,10px);letter-spacing:.14em;
+  padding:3px 8px 2px;border-radius:var(--r-pill);
+  border:1px solid rgba(233,228,214,.28);color:rgba(233,228,214,.82);
+}
+#resultView .rationale .chip.pen{border-color:rgba(255,46,76,.45);color:rgba(255,120,138,.9)}
+#resultView .rationale .chip.ctx{border-color:rgba(140,147,160,.35);color:var(--ash)}
+
+/* 計測タイル。ラベルの下に値を置くので、値が長くても「…」に潰れない
+   (横並びの 2 列は値が省略されて数字が読めなくなった: 2026-09-05 実測)。 */
+#resultView .rows{
+  flex-shrink:0;margin-top:clamp(10px,2.8vw,16px);
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;
+}
+#resultView .row{
+  display:flex;flex-direction:column;gap:3px;min-width:0;
+  padding:clamp(7px,2vw,10px) clamp(8px,2.4vw,12px);
+  border:1px solid rgba(233,228,214,.10);border-radius:10px;
+  background:rgba(5,6,8,.42);
+}
+#resultView .row span{color:var(--ash);font-size:clamp(8px,2.1vw,10px);letter-spacing:.2em;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+#resultView .row b{color:var(--bone);font-weight:400;font-size:clamp(11px,3.1vw,14px);letter-spacing:.04em;
+  font-variant-numeric:tabular-nums;line-height:1.25;overflow-wrap:anywhere}
+#resultView .row.wide{grid-column:1 / -1}
+#resultView .row.hot b{color:var(--c)}
+#resultView .foot{
+  margin-top:clamp(10px,2.6vw,15px);display:flex;justify-content:space-between;
+  gap:10px;font-size:clamp(7px,1.9vw,9px);letter-spacing:.18em;color:var(--ash);
+}
+#resultView .act{
+  margin-top:clamp(12px,3vw,18px);width:100%;padding:15px;
+  background:transparent;border:1.5px solid rgb(from var(--c) r g b / .5);
+  color:var(--c);font-family:var(--mono);font-size:11px;letter-spacing:.3em;
+  border-radius:var(--r-pill);cursor:pointer;
+}
+#resultView .act:active{background:var(--c);color:var(--void)}
+#resultView .act:focus-visible{outline:2px solid var(--c);outline-offset:3px}
+
+/* 保存シート — Telegram の WebView は <a download> を弾くので、
+   長押しさせる <img> を渡す。iOS / Android / デスクトップの全部で動く。 */
+#resultView .sheet{
+  position:fixed;inset:0;z-index:40;background:rgba(3,4,5,.96);
+  display:none;flex-direction:column;align-items:center;justify-content:center;
+  padding:calc(var(--pad-top) + 20px) 20px calc(var(--pad-bot) + 20px);gap:16px;
+}
+#resultView .sheet[open]{display:flex}
+#resultView .sheet img{max-width:100%;max-height:72%;object-fit:contain;-webkit-user-select:auto;user-select:auto;
+  -webkit-touch-callout:default;border:1px solid rgba(233,228,214,.14);border-radius:12px}
+#resultView .sheet p{font-size:11px;letter-spacing:.2em;color:var(--ash);text-align:center}
+#resultView .sheet button{
+  padding:12px 26px;background:transparent;border:1px solid rgba(233,228,214,.3);
+  color:var(--bone);font-family:var(--mono);font-size:11px;letter-spacing:.26em;border-radius:var(--r-pill);
+}
+
+/* 統合で追加: 閉じる導線と背景の切替。ピルより弱く、行より目立たない大きさに留める。 */
+#resultView .result-bar{
+  position:absolute;top:calc(var(--pad-top) + clamp(10px,3vw,18px));
+  right:clamp(18px,4.6vw,30px);z-index:5;display:flex;gap:6px;
+  /* 出所チップは幅が無ければボタンの下の行へ落とす(見出しに重ねない) */
+  flex-wrap:wrap;justify-content:flex-end;max-width:min(62%,320px);
+}
+#resultView .result-bar button{
+  min-height:30px;padding:0 11px;background:rgba(5,6,8,.62);
+  border:1px solid rgba(233,228,214,.22);color:var(--bone);
+  font-family:var(--mono);font-size:9px;letter-spacing:.2em;border-radius:var(--r-pill);cursor:pointer;
+}
+#resultView .result-bar #result-note{
+  align-self:center;padding:0 11px;line-height:30px;
+  border:1px solid rgba(255,46,76,.45);color:var(--loss);
+  border-radius:var(--r-pill);
+  font-size:9px;letter-spacing:.16em;white-space:nowrap;
+}
+#resultView .result-bar #result-note[hidden]{display:none}
+#resultView .result-bar button:active{background:var(--bone);color:var(--void)}
+#resultView .result-bar button:focus-visible{outline:2px solid var(--bone);outline-offset:2px}
+/* 閉じるボタンと同じ高さに来るので、眉の右端を少しだけ空ける */
+#resultView .eyebrow{padding-right:104px}
+
+/* ═══ GIF ステッカー背景(2026-08-16: 宇宙プレート版の後継)═══
+   img は canvas の下(DOM 順)。gif モードの canvas は透過で、
+   可読性スクリムと価格の軌跡・ENTRY/EXIT だけを上に描く。 */
+#resultView .hero-gif{
+  position:absolute;left:0;top:0;width:100%;height:56%;
+  object-fit:cover;display:none;
+  filter:saturate(.85) contrast(1.06) brightness(.88);
+}
+#resultView.gifbg .hero-gif{display:block}
+/* 走査線 — ミームの色数を機体の世界観に寄せる薄い皮膜。
+   疑似要素の台帳(HANDOFF §10): .card::after=ビネット(z-3) / .card::before=走査線(gifbg のみ) */
+#resultView.gifbg .card::before{
+  content:'';position:absolute;left:0;top:0;width:100%;height:56%;
+  z-index:1;pointer-events:none;
+  background:repeating-linear-gradient(to bottom,
+    rgba(0,0,0,.15) 0 1px, rgba(0,0,0,0) 1px 3px);
+}
+
+@media (prefers-reduced-motion:reduce){
+  #resultView *{animation:none!important;transition:none!important}
+  /* 動く GIF は出さない。1フレーム目は canvas 側(renderGif)が静止画で敷く */
+  #resultView .hero-gif{display:none!important}
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "NQX_MONITOR_PIPELINE/1",
+  "symbol": "MNQU6",
+  "provider": {
+    "type": "file",
+    "snapshotInputPath": ".secrets/monitor_snapshot.json",
+    "cvdRetryInputPath": ".secrets/monitor_cvd_retry.json"
+  },
+  "maxAgeSec": {
+    "market": 600,
+    "bars1m": 180,
+    "bars3m": 600,
+    "bars15m": 1800,
+    "bars45m": 6000,
+    "bars1h": 7800,
+    "bars4h": 29400,
+    "bars1d": 173400,
+    "cvd": 600
+  },
+  "output": {
+    "cyclePath": ".secrets/monitor_pipeline_cycle.json",
+    "publishBundlePath": ".secrets/monitor_pipeline_bundle.json"
+  },
+  "execution": {
+    "mode": "DRY_RUN_ONLY"
+  }
+}

@@ -1,0 +1,257 @@
+{
+  "version": "R22-EXECUTION-CONTRACT-1",
+  "intent": {
+    "version": "R18-EXECUTION-INTENT-1"
+  },
+  "claim": {
+    "permanentEntryTombstone": true,
+    "tupleFields": [
+      "scenarioId",
+      "fingerprint",
+      "evidenceHash",
+      "marketCycleId"
+    ],
+    "staleReleaseSec": 900,
+    "staleReleaseRequiresFlatBroker": true,
+    "_maxAgeSecNote": "R41: 30 秒はこのパイプラインでは満たせない。CLAIM の後に order.py の dry-run と live-run(各々 HTTP 数本)が挟まってから CONSUME に届くため、実測で 30 秒を超える。1 監視周期(180 秒)を上限にする。2026-09-01: この節に maxAgeSec が 30 と 180 の**2回**書かれていた。JSON は後勝ちなので実効値は 180 のままだが、先頭の 30 を直しても何も変わらない死んだ行だったので削除した(wrangler の duplicate-object-key 警告の出所)。",
+    "maxAgeSec": 180
+  },
+  "marketOrder": {
+    "_maxPriceAgeSecNote": "R41: 5 秒は構造的に満たせず、成行が全て ENTRY_CLAIM_MARKET_PRICE_STALE で落ちていた(2026-08-25 22:27)。価格の妥当性を守っているのは maxDeviationPoints(供給された last と正本価格の乖離 2pt)であって、この時間予算ではない。パイプラインの実時間に合わせる。",
+    "maxPriceAgeSec": 60,
+    "maxDeviationPoints": 2.0,
+    "actualFillRequiredForOwnership": true,
+    "actualFillTickSize": 0.25,
+    "recalculateRiskFromActualFill": true
+  },
+  "dayguard": {
+    "maxAgeSec": 600
+  },
+  "management": {
+    "version": "R22-MANAGEMENT-INTENT-1",
+    "claimMaxAgeSec": 30
+  },
+  "brokerObservation": {
+    "maxAgeSec": 30,
+    "maxComponentSkewSec": 2,
+    "maxOrders": 16,
+    "futureToleranceSec": 0,
+    "requireSnapshotCas": true,
+    "activeStates": [
+      "WORKING",
+      "ACCEPTED",
+      "SUBMITTED",
+      "PENDING",
+      "PENDING_SUBMIT",
+      "PARTIALLY_FILLED",
+      "PARTIAL_FILL"
+    ],
+    "terminalStates": [
+      "FILLED",
+      "CANCELED",
+      "REJECTED",
+      "EXPIRED"
+    ],
+    "statusByPlatform": {
+      "NT8": {
+        "active": [
+          "WORKING",
+          "ACCEPTED",
+          "SUBMITTED",
+          "PENDING_SUBMIT",
+          "PARTIALLY_FILLED"
+        ],
+        "terminal": [
+          "FILLED",
+          "CANCELED",
+          "REJECTED",
+          "EXPIRED"
+        ]
+      },
+      "TRADOVATE": {
+        "active": [
+          "WORKING",
+          "PENDING",
+          "SUSPENDED",
+          "PARTIALLY_FILLED"
+        ],
+        "terminal": [
+          "FILLED",
+          "CANCELED",
+          "REJECTED",
+          "EXPIRED"
+        ]
+      }
+    }
+  },
+  "ultra": {
+    "enabled": true,
+    "version": "ULTRA-MODE/1",
+    "requiresExplicitMode": true,
+    "maxQtyPerAccount": 100,
+    "maxTotalQty": 300,
+    "maxAccounts": 8,
+    "minQtyPerAccount": 2,
+    "riskCapSource": "ACCOUNT_DRAWDOWN_BUFFER",
+    "maxRiskDollarsPerAccount": 5000.0,
+    "maxRiskDollarsTotal": 12000.0,
+    "splitPlan": {
+      "legCount": 2,
+      "allocation": "PROPORTIONAL",
+      "runnerRemainder": true,
+      "minLegQty": 1
+    }
+  },
+  "routeIdentity": {
+    "source": "BROKER_ORDER_WINDOW",
+    "acceptedLegRequiresOrderIdAndReceipt": true,
+    "responseBodyIdentityOptional": true,
+    "snapshotPerAttempt": true,
+    "derivedReceiptWhenBrokerIssuesNone": true,
+    "derivedReceiptFormat": "PLATFORM:ACCOUNT:ORDER_ID",
+    "replacementBracketRequiresNewPair": true,
+    "perOrderReplacementReceipts": true
+  },
+  "pyramid": {
+    "_note": "R83(2026-09-12 ユーザー決定): 追撃(pyramiding)。保有中に**同方向の新規シグナル**が ARMED になったら建て増す。枚数は ULTRA で**合計建玉**を引き直し、今の枚数との差だけ足す。口座別リスク上限は各エントリー個別ではなく**追撃後の合計建玉**へ掛ける(CrossTrade/Tradovate は同一口座の同方向建玉を 1 本にネッティングするため)。enabled=false の間は一切評価しない。enabled=true でも dryRun=true の間は判定をサイクル注記に出すだけで**送らない**(影運転)。実弾に回すのは dryRun=false にしたときだけ。",
+    "_r84Note": "R84(docs/R84_PYRAMID_TRANCHE_MANAGEMENT.md): 構造トランシェ台帳。追撃はそれ自体が完結した分割ブラケット付きエントリー(加算型)として送り、既存トランシェの OCO には触れない。所有権は枚数の集合照合(lifecycle_quantities)ではなく脚ごとの三状態(OPEN/CLOSED/INCONSISTENT)から期待枚数を導出する。ロールアウトは §11 の M0→M5。dryRun=false は M3(Worker デプロイ + conformance)完了前に立てない。",
+    "enabled": true,
+    "dryRun": true,
+    "trigger": "SAME_SIDE_SIGNAL",
+    "minGrade": "A",
+    "maxAdds": 2,
+    "orderType": "MARKET_ONLY",
+    "minAddQty": 2,
+    "finalTargetPolicy": "LATEST_TRANCHE",
+    "commitSettleAttempts": 8,
+    "commitSettleDelaySec": 0.5
+  },
+  "manualHalt": {
+    "_note": "R82(2026-09-12 ユーザー決定): 設定ファイル側の緊急停止。autotrade=true の間は自律経路の新規 ENTRY・追撃・建玉管理(建値移動/トレール/張り替え)がすべて止まる。環境変数 NQX_AUTOTRADE / NQX_LIVE_ORDERS や武装台帳より**強い** —— 緊急停止が別経路で上書きされては意味がないため。**撤退だけは塞がない**: NQX_AUTOTRADE_KILL=1 の全決済と、人が叩く order.py --flatten は従来どおり通る(出口を消す緊急停止は緊急停止ではない)。管理も止まるので、保有中に立てるとブローカー側 OCO だけが建玉を守る状態になる。",
+    "autotrade": false
+  },
+  "ownershipAttribution": {
+    "_note": "R79(2026-09-12 ユーザー決定): 台帳(凍結 route snapshot)の注文 ID と receipt で身元が取れた脚は nightwatch の所有物とみなす。成行の平均建値が凍結参照価格から不利側へ乖離していても、身元が自前の送信記録で証明されている以上『他人の建玉』ではない。manualHalt=true が緊急停止で、ON の間は R52/R76 の厳格な乖離ゲートへ戻る。身元(orderId/receipt/口座/銘柄/方向/枚数/ブラケット構造)の検査は一切緩めない。",
+    "ledgerBackedOwnership": true,
+    "manualHalt": false
+  },
+  "entryDepth": {
+    "_note": "R86(2026-09-14, docs/R86_ENTRY_DEPTH_AND_STOP_ROOM.md): 押し目を深く取り SL にも同じだけ余裕を持たせる『ブラケットの平行移動』。建値と SL を同じ幅だけ不利方向へ動かすので SL 幅(リスク額・枚数)は変わらず、ターゲット価格も変えない。判定(model/grade/state/decisionId)は元の幾何のまま。対象は建値に構造の錨が無い VP80_REVERSION(建値 = 直近終値)だけ。レベルそのものに建てる BREAKER/TURTLE は深くすると逆選択で悪化し、SL だけ広げるのはどのモデルでも改善しなかったので受け付けない(stopShift は SAME_AS_DEPTH のみ)。mode: OFF=何もしない / SHADOW=発注は変えずバンドル entryDepth に『動かした場合』を記録 / LIVE=公開シナリオの entry/stop を置き換え、evaluation.decision.evidence に記録専用タグ ENTRY_DEPTH_025N を足す。検証は python entry_depth.py --report / --trades(読むだけ)。",
+    "version": "R86-ENTRY-DEPTH-1",
+    "_modeNote": "2026-09-14 ユーザー決定で SHADOW → LIVE。撤退基準は docs/R86 §5(OFF に戻すのはこの 1 値)。",
+    "mode": "LIVE",
+    "stopShift": "SAME_AS_DEPTH",
+    "maxDepthPt": 10.0,
+    "rules": [
+      {
+        "case": "VP80_CLOSE_ANCHOR",
+        "models": [
+          "VP80_REVERSION"
+        ],
+        "depthN": 0.25
+      }
+    ]
+  },
+  "stopLogic": {
+    "_note": "R90(2026-09-15, docs/R90_STOP_LOGIC_HOLES.md): 初期 SL の 3 つの穴。きっかけは 09-14 23:26 の BREAKER BUY(VWAP の 10pt 手前の SL が押しの安値で刺さり、その後 +337pt)。vwapClearance: VWAP が SL の近く(withinN×N 以内、VWAP ちょうど・わずか内側も含む)にあれば SL を VWAP の外側 clearN×N へ逃がす(mode OFF / SHADOW=記録のみ / LIVE=置換。60pt 上限・R:R が壊れれば候補は WATCH。SL が変わると decisionId も変わる)。marketStopGuard: 成行に切り替わる周期に、発注時点の価格から SL まで minN×N 未満なら出さない(engine は claim の前に公開価格で、order.py は送信直前に quote で同じ算術。OFF / LIVE)。flipOrigin: BREAKER の SL の錨をブレイク足でなく上昇/下降の起点(安値/高値が切り下がる/切り上がる限り maxBarsBack 本まで遡る)へ(OFF / LIVE。R88 の TURTLE と同じ形で decisionId が変わる)。各節は独立に検証され、壊れた節だけ OFF に倒れる。検証は python stop_logic.py --policy / --report(読むだけ)。",
+    "version": "R90-STOP-LOGIC-1",
+    "_decisionNote": "2026-09-15 再生(監査バンドル 1,223 本、docs/R90 §3): vwapClearance は塊の先頭 +4.4R(65→61 件)・逐次 +4.4R(ゲート込み +14.06 vs +9.71)で全表示で改善 → LIVE。marketStopGuard は全表示で改善(逐次 +2.3R、塞いだ 14 件中 11 件が損切り)→ LIVE。flipOrigin は塊で +4.2R だが逐次で −1.0R(BREAKER を RISK_CAP_EXCEEDED の WATCH に変えるだけで、空いた枠が別の負けで埋まる)→ 実装は残して OFF。戻すのは各 mode の 1 値。",
+    "vwapClearance": {
+      "mode": "LIVE",
+      "withinN": 1.0,
+      "clearN": 0.25,
+      "models": [
+        "VP80_REVERSION",
+        "TURTLE_SOUP_REVERSAL",
+        "BREAKER_CONTINUATION",
+        "OTE_FVG_PULLBACK"
+      ]
+    },
+    "marketStopGuard": {
+      "mode": "LIVE",
+      "minN": 1.0
+    },
+    "flipOrigin": {
+      "mode": "OFF",
+      "maxBarsBack": 5
+    }
+  },
+  "modelGate": {
+    "_note": "R89(2026-09-14, docs/R89_MODEL_GATE.md): 武装から外すモデル/型。disabled の各行 {model, variant} に当たる候補は評価・記録はするが primary に選ばない(hardBlockers に MODEL_DISABLED / RESTING_LIMIT_DISABLED を付けて WATCH。別モデルが primary になれる)。variant: ALL = そのモデルの候補すべて / RESTING_LIMIT = MSS 確認後にレベルへ先回りする指値(restingLimit。現状 TURTLE_SOUP_REVERSAL だけが持つ)だけ。空配列 = 何も外さない。不正な行は無視されるので、書き換えたら python tests/test_r89_model_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R89-MODEL-GATE-1",
+    "_decisionNote": "2026-09-14 ユーザー決定: TURTLE_SOUP_REVERSAL を ALL で外した(先回り指値型もリテスト保持型も primary に選ばない)。根拠は docs/R89_MODEL_GATE.md §1。戻すのは disabled を [] にする 1 行。",
+    "disabled": [
+      {
+        "model": "TURTLE_SOUP_REVERSAL",
+        "variant": "ALL"
+      }
+    ]
+  },
+  "fillWatch": {
+    "_note": "R91(2026-09-15, docs/R91_FILL_WATCH_REALTIME.md): 約定監視 fill_watch.py の常駐と照会間隔。CrossTrade の Tradovate 口座は REST のみ(WebSocket は NinjaTrader 8 口座だけ、約定のプッシュ通知も無い)なので、上限(利用者ごと毎秒 3 回・溜め 20 回、REST と WebSocket で共有、超過は 429)の中で照会を詰める。autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっていれば切り離したプロセスとして起動し直す(単一インスタンス、出力は .secrets/fill_watch.log)。fastIntervalSec = 建玉がある間の間隔 / idleIntervalSec = FLAT の間隔 / maxRequestsPerSec = fill_watch 自身の上限(ループの照会と送信後照会の分を残す。FLAT の照会は裏取りで 2 本) / rateLimitBackoffSec = 429 を見たら空ける秒数。ループの reconcile 中は照会しない。",
+    "version": "R91-FILL-WATCH-1",
+    "_decisionNote": "2026-09-15 ユーザー決定で autostart=true(nqx_cycle が止まった fill_watch を毎周期起動し直す)。止めるときは false にしてからプロセスを止める(pid は .secrets/fill_watch_heartbeat.json)。",
+    "autostart": true,
+    "fastIntervalSec": 1.5,
+    "idleIntervalSec": 5.0,
+    "maxRequestsPerSec": 1.0,
+    "rateLimitBackoffSec": 15.0
+  },
+  "accountMode": {
+    "kind": "MIRRORED",
+    "maxAccounts": null
+  },
+  "market": {
+    "maxAgeSec": 600,
+    "futureToleranceSec": 60
+  },
+  "scenario": {
+    "maxAgeSec": 600,
+    "allowedGrades": [
+      "A",
+      "A+",
+      "B"
+    ],
+    "allowedStates": [
+      "ARMED",
+      "ACTIVE"
+    ]
+  },
+  "cvd": {
+    "timestampRequiredForAPlus": true,
+    "maxAgeSec": 600,
+    "missingTimestampCap": "A",
+    "retryRequired": true
+  },
+  "risk": {
+    "pointValue": 2.0,
+    "maxQty": 2,
+    "fixedQty": 2,
+    "defaultCapDollars": 240.0,
+    "accountPrefix": "RISK_"
+  },
+  "splitPlan": {
+    "requiredForEntry": true,
+    "targetCount": 2,
+    "legCount": 2,
+    "legQty": 1,
+    "planVersionRequired": true
+  },
+  "session": {
+    "endField": "sessionEndAt"
+  },
+  "blockingOrderStates": [
+    "PENDING",
+    "SENT",
+    "UNKNOWN",
+    "PARTIAL",
+    "ENTRY_PARTIAL_ROUTE",
+    "ENTRY_PARTIAL_FILL",
+    "ENTRY_RESTING"
+  ],
+  "openPositionStates": [
+    "OPEN",
+    "PARTIAL",
+    "EXIT_PENDING"
+  ]
+}

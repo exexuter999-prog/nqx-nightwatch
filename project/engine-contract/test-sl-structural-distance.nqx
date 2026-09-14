@@ -1,0 +1,5 @@
+!NQX/1
+M|sy=MNQ1!|tf=3M/15M/45M|at=2026-07-20 18:37 JST|ss=OTHER|sf=3M,15M,45M|dq=M|px=28905.5|qm=H
+Z|s=28898,28835.38,28814,28797.75,28706.75,28683,28558.75,28408.25|r=28939.75,28951,28964,29047,29059.5,29089,29220
+G|n=1|ip=FLAT / NO TRADE|mx=NOT REQUIRED|io=S1 PASS|rn=TEST FIXTURE ONLY
+S1|n=上側価値受容ロングTEST|d=L|st=W|su=BC|ha=M|lt=multi-session resistance cluster|zq=S|fr=BT|tr=TEST TRIGGER|co=TEST CONFIRMATION|en=28951..28964|sl=28927.75|tp=29047,29059.5,29089|rr=3.01,3.43,4.42|iv=28939.75|od=TEST|vu=2026-07-20 19:30 JST|eh=no new entry until event clock verified|fm=false acceptance|sd=15M closes below 28898|ef=OBSERVED bullish rebound|ea=OBSERVED HTF bearish|cc=TEST FIXTURE — NO MARKET CLAIM

@@ -1,0 +1,270 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// Unified CVD Oscillator — CVDS(Flux) / CVD Divergence(TFlab) / CVD IQ(TradingIQ) の統合版
+//
+// 採用した部分:
+//   計算   : ta.requestVolumeDelta (公式・最も正確)
+//   表示   : ヒストグラム (TFlab スタイル)
+//   検出   : フラクタル・ダイバージェンス + EMA クロス
+//   分析表 : Bar / Day / Swing の3列 (TradingIQ を簡素化)
+//
+// 削除した部分:
+//   バックテスト表 (少サンプルで誤解を招く)
+//   FVG / Order Block 検出 (Key Levels + VP で代替)
+//   Market Ultra Data (先物では機能しない)
+//   コストグラデーション / CVDローソク (複雑さの割に情報量が薄い)
+
+//@version=5
+indicator("CVD Unified", shorttitle="CVD-U", overlay=false, precision=0, max_lines_count=200, max_labels_count=200)
+import TradingView/ta/8 as tvta
+
+// ═══════════════════════════════════════════════════════
+//  Inputs
+// ═══════════════════════════════════════════════════════
+gCalc = "CVD 計算"
+ltfInput = input.timeframe("1", "下位足", group=gCalc, tooltip="CVD算出に使う下位足。細かいほど精度が上がるがデータ制限あり")
+anchorMode = input.string("Session", "リセット", options=["Session","Periodic"], group=gCalc, tooltip="Session = 日次リセット (VWAP/VPと基準を揃える)\nPeriodic = 指定本数のローリング")
+periodLen = input.int(39, "Periodic 本数", minval=2, group=gCalc, tooltip="10分足39本 ≈ NYセッション6.5時間")
+
+gEma = "EMA クロス"
+useEma   = input.bool(true, "有効", group=gEma)
+fastLen  = input.int(20, "短期", minval=1, group=gEma, tooltip="10分足20本 ≈ 3.3時間")
+slowLen  = input.int(50, "長期", minval=1, group=gEma, tooltip="10分足50本 ≈ 8.3時間")
+fastCol  = input.color(#55ffda, "短期色", group=gEma, inline="ec")
+slowCol  = input.color(#8c5bff, "長期色", group=gEma, inline="ec")
+
+gDiv = "ダイバージェンス"
+useDiv     = input.bool(true, "有効", group=gDiv)
+fracLen = input.int(5, "フラクタル期間", minval=1, group=gDiv, tooltip="小さいほどシグナルが乱発する。2は非推奨、5前後が実用的")
+maxLookback= input.int(30, "最大探索バー数", minval=5, group=gDiv, tooltip="この本数以上離れたピボット同士は比較しない")
+divBullCol = input.color(#26a69a, "強気", group=gDiv, inline="dc")
+divBearCol = input.color(#ef5350, "弱気", group=gDiv, inline="dc")
+showDivLbl = input.bool(true, "ラベル表示", group=gDiv)
+showOnChart= input.bool(true, "価格チャートにも描画", group=gDiv)
+
+gZero = "ゼロクロス"
+useZero = input.bool(true, "ゼロクロスを表示", group=gZero, tooltip="CVDがゼロを跨いだ瞬間。需給の主導権が入れ替わったサイン")
+
+gTbl = "分析表"
+showTable = input.bool(true, "表示", group=gTbl)
+tblPos    = input.string("右上", "位置", options=["右上","右下","左上","左下"], group=gTbl)
+tblSize   = input.string("小", "文字サイズ", options=["極小","小","標準","大"], group=gTbl)
+
+// ═══════════════════════════════════════════════════════
+//  CVD 計算 (公式ライブラリ)
+// ═══════════════════════════════════════════════════════
+if timeframe.in_seconds() <= timeframe.in_seconds(ltfInput)
+    runtime.error("下位足がチャート時間足以上です。チャートの時間足を上げるか、下位足の設定を下げてください。")
+
+[oVol, mxVol, mnVol, lastVol] = tvta.requestVolumeDelta(ltfInput, "1D")
+
+// Periodic モードは自前で積算し直す
+barDelta = nz(lastVol - nz(lastVol[1]))
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    barDelta := nz(lastVol)
+
+cvd = anchorMode == "Session" ? nz(lastVol) : math.sum(barDelta, periodLen)
+
+// ═══════════════════════════════════════════════════════
+//  EMA
+// ═══════════════════════════════════════════════════════
+emaFast = ta.ema(cvd, fastLen)
+emaSlow = ta.ema(cvd, slowLen)
+gc = useEma and ta.crossover(emaFast, emaSlow)
+dc = useEma and ta.crossunder(emaFast, emaSlow)
+
+// ═══════════════════════════════════════════════════════
+//  ゼロクロス
+// ═══════════════════════════════════════════════════════
+zUp = useZero and ta.crossover(cvd, 0)
+zDn = useZero and ta.crossunder(cvd, 0)
+
+// ═══════════════════════════════════════════════════════
+//  ダイバージェンス (フラクタル方式)
+// ═══════════════════════════════════════════════════════
+phBar = ta.pivothigh(high, fracLen, fracLen)
+plBar = ta.pivotlow(low,  fracLen, fracLen)
+
+// 直近2つのピボット値を保持
+lastPH  = ta.valuewhen(phBar, high[fracLen], 0)
+prevPH  = ta.valuewhen(phBar, high[fracLen], 1)
+lastPHc = ta.valuewhen(phBar, cvd[fracLen],  0)
+prevPHc = ta.valuewhen(phBar, cvd[fracLen],  1)
+lastPHb = ta.valuewhen(phBar, bar_index[fracLen], 0)
+prevPHb = ta.valuewhen(phBar, bar_index[fracLen], 1)
+
+lastPL  = ta.valuewhen(plBar, low[fracLen], 0)
+prevPL  = ta.valuewhen(plBar, low[fracLen], 1)
+lastPLc = ta.valuewhen(plBar, cvd[fracLen], 0)
+prevPLc = ta.valuewhen(plBar, cvd[fracLen], 1)
+lastPLb = ta.valuewhen(plBar, bar_index[fracLen], 0)
+prevPLb = ta.valuewhen(plBar, bar_index[fracLen], 1)
+
+inRangeH = not na(lastPHb) and not na(prevPHb) and (lastPHb - prevPHb) < maxLookback and (lastPHb + maxLookback) > bar_index
+inRangeL = not na(lastPLb) and not na(prevPLb) and (lastPLb - prevPLb) < maxLookback and (lastPLb + maxLookback) > bar_index
+
+// 価格が高値切り上げ + CVDが切り下げ → 弱気
+bearDiv = useDiv and inRangeH and lastPH > prevPH and lastPHc < prevPHc
+// 価格が安値切り下げ + CVDが切り上げ → 強気
+bullDiv = useDiv and inRangeL and lastPL < prevPL and lastPLc > prevPLc
+
+newBear = bearDiv and ta.change(lastPH) != 0
+newBull = bullDiv and ta.change(lastPL) != 0
+
+// 連続検出カウント → 強度
+var int bearCnt = 0
+var int bullCnt = 0
+bearCnt := newBear ? bearCnt + 1 : bearDiv ? bearCnt : 0
+bullCnt := newBull ? bullCnt + 1 : bullDiv ? bullCnt : 0
+
+f_strength(int c) => c >= 3 ? "Strong" : c == 2 ? "Good" : c == 1 ? "Normal" : "-"
+
+// ═══════════════════════════════════════════════════════
+//  描画: ヒストグラム + EMA
+// ═══════════════════════════════════════════════════════
+histCol = cvd >= 0 ? color.new(divBullCol, 45) : color.new(divBearCol, 45)
+plot(cvd, "CVD", color=histCol, style=plot.style_columns)
+plot(useEma ? emaFast : na, "EMA Fast", color=fastCol, linewidth=2)
+plot(useEma ? emaSlow : na, "EMA Slow", color=slowCol, linewidth=2)
+hline(0, "Zero", color=color.new(color.gray, 55), linestyle=hline.style_dotted)
+
+plotshape(gc, "GC", shape.triangleup,   location.bottom, fastCol, size=size.tiny)
+plotshape(dc, "DC", shape.triangledown, location.top,    slowCol, size=size.tiny)
+plotshape(zUp, "ZeroUp", shape.circle,  location.bottom, color.new(fastCol, 40), size=size.tiny)
+plotshape(zDn, "ZeroDn", shape.circle,  location.top,    color.new(slowCol, 40), size=size.tiny)
+
+// ダイバージェンス線 + ラベル
+if newBull
+    line.new(prevPLb, prevPLc, lastPLb, lastPLc, color=divBullCol, width=2)
+    if showDivLbl
+        label.new(lastPLb, lastPLc, "+RD", color=divBullCol, textcolor=color.white, size=size.tiny, style=label.style_label_up)
+    if showOnChart
+        line.new(prevPLb, prevPL, lastPLb, lastPL, color=divBullCol, width=2, force_overlay=true)
+        if showDivLbl
+            label.new(lastPLb, lastPL, "+RD", color=divBullCol, textcolor=color.white, size=size.tiny, style=label.style_label_up, force_overlay=true)
+
+if newBear
+    line.new(prevPHb, prevPHc, lastPHb, lastPHc, color=divBearCol, width=2)
+    if showDivLbl
+        label.new(lastPHb, lastPHc, "-RD", color=divBearCol, textcolor=color.white, size=size.tiny, style=label.style_label_down)
+    if showOnChart
+        line.new(prevPHb, prevPH, lastPHb, lastPH, color=divBearCol, width=2, force_overlay=true)
+        if showDivLbl
+            label.new(lastPHb, lastPH, "-RD", color=divBearCol, textcolor=color.white, size=size.tiny, style=label.style_label_down, force_overlay=true)
+
+// ═══════════════════════════════════════════════════════
+//  分析表 (Bar / Day / Swing)
+// ═══════════════════════════════════════════════════════
+f_pos(string p) => p == "右上" ? position.top_right : p == "右下" ? position.bottom_right : p == "左上" ? position.top_left : position.bottom_left
+
+f_col(float v) => v > 0 ? #96ffe8 : v < 0 ? #ff9696 : color.silver
+f_size(string s) => s == "極小" ? size.tiny : s == "小" ? size.small : s == "標準" ? size.normal : size.large
+f_sizeHead(string s) => s == "極小" ? size.small : s == "小" ? size.normal : size.large
+
+// 当日の始値・高安
+var float dayOpen = na
+var float dayHi   = na
+var float dayLo   = na
+if isNewDay
+    dayOpen := open
+    dayHi   := high
+    dayLo   := low
+dayHi := math.max(nz(dayHi, high), high)
+dayLo := math.min(nz(dayLo, low),  low)
+
+var float dayCvdStart = 0.0
+if isNewDay
+    dayCvdStart := cvd
+
+// スイング起点 = 直近のピボット
+swingBar   = math.max(nz(lastPHb), nz(lastPLb))
+swingPrice = nz(lastPHb) > nz(lastPLb) ? lastPH : lastPL
+swingCvd   = nz(lastPHb) > nz(lastPLb) ? lastPHc : lastPLc
+
+var table t = table.new(f_pos(tblPos), 4, 9, bgcolor=#20222C, border_color=#363843, border_width=1, frame_width=1)
+
+if showTable and barstate.islast
+    fg  = color.white
+    cB  = #96ffe8
+    cS  = #ff9696
+    bgA = #20222C
+    bgB = #181b27
+    ts  = f_size(tblSize)
+    tsH = f_sizeHead(tblSize)
+
+    // 各期間のデルタ
+    dBar   = cvd - nz(cvd[1])
+    dDay   = cvd - dayCvdStart
+    dSwing = cvd - nz(swingCvd)
+
+    // 価格変化(ティック)
+    tBar   = (close - open) / syminfo.mintick
+    tDay   = (close - nz(dayOpen, open)) / syminfo.mintick
+    tSwing = (close - nz(swingPrice, close)) / syminfo.mintick
+
+    // 終値位置
+    pBar   = high != low ? (close - low) / (high - low) * 100 : 50
+    pDay   = dayHi != dayLo ? (close - dayLo) / (dayHi - dayLo) * 100 : 50
+
+    // 効率 = 1000デルタあたり何ティック動いたか
+    eBar   = dBar   != 0 ? tBar   / (math.abs(dBar)   / 1000) : 0
+    eDay   = dDay   != 0 ? tDay   / (math.abs(dDay)   / 1000) : 0
+    eSwing = dSwing != 0 ? tSwing / (math.abs(dSwing) / 1000) : 0
+
+    table.cell(t, 0, 0, "CVD 分析", text_color=fg, text_size=tsH, bgcolor=bgA)
+    table.merge_cells(t, 0, 0, 3, 0)
+
+    table.cell(t, 0, 1, "",      text_color=fg, text_size=ts, bgcolor=bgB)
+    table.cell(t, 1, 1, "Bar",   text_color=fg, text_size=ts, bgcolor=bgB)
+    table.cell(t, 2, 1, "Day",   text_color=fg, text_size=ts, bgcolor=bgB)
+    table.cell(t, 3, 1, "Swing", text_color=fg, text_size=ts, bgcolor=bgB)
+
+    table.cell(t, 0, 2, "Δ CVD", text_color=fg, text_size=ts, bgcolor=bgA, tooltip="各期間のCVD変化量。プラス=買い優勢")
+    table.cell(t, 1, 2, str.tostring(dBar,   format.volume), text_color=f_col(dBar),   text_size=ts, bgcolor=bgA)
+    table.cell(t, 2, 2, str.tostring(dDay,   format.volume), text_color=f_col(dDay),   text_size=ts, bgcolor=bgA)
+    table.cell(t, 3, 2, str.tostring(dSwing, format.volume), text_color=f_col(dSwing), text_size=ts, bgcolor=bgA)
+
+    table.cell(t, 0, 3, "価格 (tick)", text_color=fg, text_size=ts, bgcolor=bgB, tooltip="各期間の価格変化(ティック)")
+    table.cell(t, 1, 3, str.tostring(tBar,   "#.#"), text_color=f_col(tBar),   text_size=ts, bgcolor=bgB)
+    table.cell(t, 2, 3, str.tostring(tDay,   "#.#"), text_color=f_col(tDay),   text_size=ts, bgcolor=bgB)
+    table.cell(t, 3, 3, str.tostring(tSwing, "#.#"), text_color=f_col(tSwing), text_size=ts, bgcolor=bgB)
+
+    table.cell(t, 0, 4, "効率 /1kΔ", text_color=fg, text_size=ts, bgcolor=bgA, tooltip="1000デルタあたり何ティック動いたか。\n高い=少ない出来高で動く(軽い)\n低い=大量の出来高が必要(重い/吸収)")
+    table.cell(t, 1, 4, str.tostring(eBar,   "#.##"), text_color=f_col(eBar),   text_size=ts, bgcolor=bgA)
+    table.cell(t, 2, 4, str.tostring(eDay,   "#.##"), text_color=f_col(eDay),   text_size=ts, bgcolor=bgA)
+    table.cell(t, 3, 4, str.tostring(eSwing, "#.##"), text_color=f_col(eSwing), text_size=ts, bgcolor=bgA)
+
+    table.cell(t, 0, 5, "終値位置", text_color=fg, text_size=ts, bgcolor=bgB, tooltip="レンジ内での終値の位置。70%超=高値引け、30%未満=安値引け")
+    table.cell(t, 1, 5, str.tostring(pBar, "#") + "%", text_color=pBar >= 70 ? cB : pBar <= 30 ? cS : color.silver, text_size=ts, bgcolor=bgB)
+    table.cell(t, 2, 5, str.tostring(pDay, "#") + "%", text_color=pDay >= 70 ? cB : pDay <= 30 ? cS : color.silver, text_size=ts, bgcolor=bgB)
+    table.cell(t, 3, 5, "-", text_color=color.silver, text_size=ts, bgcolor=bgB)
+
+    // 吸収判定: デルタと価格が逆行
+    absTxt = dBar > 0 and close <= open ? "買い吸収" :
+             dBar < 0 and close >= open ? "売り吸収" : "-"
+    absCol = absTxt == "-" ? color.silver : color.rgb(255, 210, 140)
+    table.cell(t, 0, 6, "吸収", text_color=fg, text_size=ts, bgcolor=bgA, tooltip="デルタと価格が逆行している状態。買いが入っているのに上がらない=売り手が吸収している")
+    table.cell(t, 1, 6, absTxt, text_color=absCol, text_size=ts, bgcolor=bgA)
+    table.merge_cells(t, 1, 6, 3, 6)
+
+    table.cell(t, 0, 7, "EMA", text_color=fg, text_size=ts, bgcolor=bgB, tooltip="CVDの短期EMAと長期EMAの位置関係")
+    emaTxt = emaFast > emaSlow ? "買い優勢" : emaFast < emaSlow ? "売り優勢" : "-"
+    table.cell(t, 1, 7, emaTxt, text_color=emaFast > emaSlow ? cB : cS, text_size=ts, bgcolor=bgB)
+    table.merge_cells(t, 1, 7, 3, 7)
+
+    table.cell(t, 0, 8, "乖離", text_color=fg, text_size=ts, bgcolor=bgA, tooltip="直近のダイバージェンス。連続検出で強度が上がる")
+    divTxt = bearCnt > 0 ? "弱気 " + f_strength(bearCnt) :
+             bullCnt > 0 ? "強気 " + f_strength(bullCnt) : "-"
+    divTxtCol = bearCnt > 0 ? cS : bullCnt > 0 ? cB : color.silver
+    table.cell(t, 1, 8, divTxt, text_color=divTxtCol, text_size=ts, bgcolor=bgA)
+    table.merge_cells(t, 1, 8, 3, 8)
+
+// ═══════════════════════════════════════════════════════
+//  アラート
+// ═══════════════════════════════════════════════════════
+alertcondition(gc,      "EMA ゴールデンクロス", "CVD EMA GC")
+alertcondition(dc,      "EMA デッドクロス",     "CVD EMA DC")
+alertcondition(zUp,     "ゼロクロス 上抜け",     "CVD Zero Cross Up")
+alertcondition(zDn,     "ゼロクロス 下抜け",     "CVD Zero Cross Down")
+alertcondition(newBull, "強気ダイバージェンス", "CVD Bullish Divergence")
+alertcondition(newBear, "弱気ダイバージェンス", "CVD Bearish Divergence")

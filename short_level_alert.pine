@@ -1,0 +1,56 @@
+//@version=5
+indicator("Short Level Alert", overlay = true)
+
+// ── 入力 ──────────────────────────────────────────────
+// 監視したい価格。C:VAL など、その日のレベルに合わせて手で変える。
+level      = input.float(29700.0, "監視レベル", step = 0.25)
+tol        = input.float(2.0,     "許容幅 (pt)", step = 0.25,
+     tooltip = "この幅以内に入ったらタッチとみなす。0 にすると完全一致のみ")
+fromBelow  = input.bool(true,  "下から戻ってタッチ",
+     tooltip = "価格がレベルの下にいる状態から上昇してタッチした時に反応")
+fromAbove  = input.bool(false, "上から落ちてタッチ")
+oncePerBar = input.bool(true,  "1本につき1回だけ発火")
+
+// ── レベル描画 ────────────────────────────────────────
+plot(level, "監視レベル", color = color.new(color.orange, 0),
+     linewidth = 2, style = plot.style_linebr)
+
+// ── タッチ判定 ────────────────────────────────────────
+upper = level + tol
+lower = level - tol
+
+// この足がレベル帯に触れたか
+touching = high >= lower and low <= upper
+
+// 前の足がレベル帯の外のどちら側にいたか
+wasBelow = high[1] < lower
+wasAbove = low[1]  > upper
+
+hitFromBelow = fromBelow and touching and wasBelow
+hitFromAbove = fromAbove and touching and wasAbove
+
+signal = hitFromBelow or hitFromAbove
+
+// 1本につき1回だけにする（同じ足で何度も鳴らさない）
+var bool fired = false
+if barstate.isnew
+    fired := false
+
+trigger = signal and (not oncePerBar or not fired)
+if trigger
+    fired := true
+
+// ── 表示 ──────────────────────────────────────────────
+plotshape(trigger, "タッチ", shape.triangledown, location.abovebar,
+     color.new(color.red, 0), size = size.small, text = "TOUCH")
+
+bgcolor(trigger ? color.new(color.red, 88) : na)
+
+// ── アラート ──────────────────────────────────────────
+alertcondition(trigger, "レベルタッチ",
+     "価格が監視レベルにタッチしました")
+
+if trigger
+    alert("Short level touch: " + str.tostring(level, "#.##") +
+          "  price=" + str.tostring(close, "#.##"),
+          alert.freq_once_per_bar)

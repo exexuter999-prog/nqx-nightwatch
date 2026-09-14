@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html,body { margin:0; width:1600px; height:1600px; overflow:hidden; background:transparent; }
+  #host { width:1600px; height:1600px; position:relative; background:transparent; }
+  canvas { width:100% !important; height:100% !important; display:block; }
+</style>
+<div id="host"></div>
+<script type="module">
+  import { initStandbyEye } from './eye3d.js';
+  const host=document.getElementById('host');
+  const eye=initStandbyEye({rand:()=>0.43});
+  eye.attach(host);
+  eye.setMode('neutral');
+  window.eyeReady=eye.available;
+  window.setEyeMode=(name)=>{eye.setMode(name); return eye.available;};
+  window.eyeData=()=>document.querySelector('canvas')?.toDataURL('image/png')||'';
+</script>

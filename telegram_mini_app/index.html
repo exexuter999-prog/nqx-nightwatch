@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- 起動 URL には launch token が載る。外部(フォント CDN 等)へ URL を渡さない。 -->
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#09090a">
+  <title>NQX // Nightwatch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- Chakra Petch: 角を落とした技術系の書体(R65)。ペットの吹き出しだけに使う —— 角ばった面と、張り詰めた読み味のため。 -->
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Chakra+Petch:wght@500;600&family=UnifrakturCook:wght@700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="result.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <!-- 背景オーロラ(3Dシーンより奥、方眼より手前) -->
+  <div class="aurora" aria-hidden="true"></div>
+  <!-- R59: 粒子の膜(金属面の質感)。表示専用、pointer-events なし。 -->
+  <div class="grain" aria-hidden="true"></div>
+  <canvas id="nightwatchCanvas" class="scene-canvas" aria-hidden="true"></canvas>
+  <!-- HUD の四隅ブラケット(計器の枠)と、ドック上の碑文 -->
+  <div class="hud" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <p class="inscription" aria-hidden="true">NOX VIGILAT · MDCCLXXVI</p>
+  <div class="demo-banner">
+    <span>DEMO — ORDERS BLOCKED</span>
+    <label id="demo-bars-wrap">BARS
+      <select id="demo-bars">
+        <option>20</option>
+        <option>40</option>
+        <option selected>60</option>
+        <option>90</option>
+        <option>120</option>
+        <option>180</option>
+      </select>
+    </label>
+    <label id="demo-scene-wrap">SCENE
+      <select id="demo-scene">
+        <option value="ARMED" selected>ARMED</option>
+        <option value="STUCK">STUCK ORDER</option>
+        <option value="RUNNER">RUNNER</option>
+        <option value="GATES">GATES</option>
+      </select>
+    </label>
+    <!-- R62: 最後のカーソルの型。選ぶと表示中の文字を打ち直して見比べられる(端末に覚える) -->
+    <label id="demo-caret-wrap">CARET
+      <select id="demo-caret">
+        <option value="auto" selected>AUTO</option>
+        <option value="eye">EYE</option>
+        <option value="diamond">DIAMOND</option>
+        <option value="ember">EMBER</option>
+        <option value="glitch">GLITCH</option>
+        <option value="candle">CANDLE</option>
+        <option value="reticle">RETICLE</option>
+        <option value="classic">CLASSIC</option>
+      </select>
+    </label>
+    <button id="demo-voice" type="button"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.6L12 18.6V5.4L7.6 9.5H4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M15.2 9.2a3.6 3.6 0 0 1 0 5.6M17.8 6.6a7.2 7.2 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg> VOICE</button>
+    <button id="demo-stickers" type="button"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c.6 5.2 4.3 8.9 9.5 9.5-5.2.6-8.9 4.3-9.5 9.5-.6-5.2-4.3-8.9-9.5-9.5 5.2-.6 8.9-4.3 9.5-9.5z" fill="currentColor"/></svg> STICKERS</button>
+  </div>
+
+  <!-- 音声キューの試聴一覧(デモ専用)。全キューを1本ずつ、または順に鳴らす。
+       SOUND スイッチとは独立(明示のタップなので必ず鳴る)。発注経路とは無接続。 -->
+  <section id="voiceGallery" hidden aria-label="音声キューの試聴">
+    <header>
+      <b><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.6L12 18.6V5.4L7.6 9.5H4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M15.2 9.2a3.6 3.6 0 0 1 0 5.6M17.8 6.6a7.2 7.2 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg> VOICE CUES</b><span id="voice-count"></span>
+      <button id="voice-close" type="button">CLOSE</button>
+    </header>
+    <div id="voice-rows"></div>
+    <button id="voice-all" type="button">PLAY ALL</button>
+  </section>
+
+  <!-- ステッカー一覧(デモ専用・閲覧のみ)。中身は app.js が stickers.js の
+       台帳から組み立てる。発注経路・実データとは一切繋がらない。 -->
+  <section id="stickerGallery" hidden aria-label="ステッカー一覧">
+    <header>
+      <b><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c.6 5.2 4.3 8.9 9.5 9.5-5.2.6-8.9 4.3-9.5 9.5-.6-5.2-4.3-8.9-9.5-9.5 5.2-.6 8.9-4.3 9.5-9.5z" fill="currentColor"/></svg> STICKER ARSENAL</b><span id="sticker-count"></span>
+      <button id="sticker-close" type="button">CLOSE</button>
+    </header>
+    <div id="sticker-groups"></div>
+    <div id="sticker-zoom" hidden>
+      <img alt="">
+      <p id="sticker-zoom-name"></p>
+    </div>
+  </section>
+  <main class="app-shell">
+    <header class="topbar">
+      <span class="wordmark">Nightwatch</span>
+      <div class="topbar-right">
+        <span id="statusPill" class="status-pill">
+          <i class="dot" aria-hidden="true"></i>
+          <span id="statusText">CONNECTING…</span>
+        </span>
+        <!-- モードの切り替えは設定タブへ。ここには現在のモード表示だけを残す。 -->
+        <div class="command-deck" role="group" aria-label="決定制御">
+          <span id="modeBadges" class="mode-badges" aria-live="polite"></span>
+        </div>
+      </div>
+    </header>
+
+    <!-- R55: 常設の計器(WATCHTOWER / LIFELINE / AUTOTRADE)を1つの側柱にまとめる。
+         狭い画面では display:contents で従来どおり縦に流れ、広い画面では
+         左の列に固定される(位置の入れ替えは CSS だけで行う)。 -->
+    <div class="side-rail">
+      <!-- 監視ループの健全性(「監視の監視」)。表示専用 — 発注経路には触れない。
+           3分ループの publish 痕跡から生死を出す。中身は renderWatchtower が更新。 -->
+      <section id="watchtower" class="watchtower" data-status="no-data" aria-label="監視ループの状態" aria-live="polite">
+        <span class="micro">WATCHTOWER</span>
+        <strong id="watchtowerStatus">—</strong>
+        <span id="watchtowerDetail" class="micro">—</span>
+      </section>
+
+      <!-- 残機(LIFELINE)。総残高を主役に、口座別は弾数ゲージで。
+           accounts が publish されていないときは非表示。 -->
+      <section id="lifeline" class="lifeline" aria-label="口座残機" hidden></section>
+
+      <!-- 自動発注(autotrade_engine)の現在地。AUTO 権限は設定タブのスイッチで
+           操作し、実注文は監視PC側の既存ゲートを通る。 -->
+      <section id="autotradePanel" class="autotrade" aria-label="自動発注" hidden></section>
+    </div>
+
+    <section class="ops" aria-label="Nightwatch console">
+      <!-- 見る順序 = 重要度順。シナリオ/建玉が先、チャートは裏付けとして下。 -->
+      <div class="section-label">
+        <span class="micro"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>WATCH</span>
+        <span id="signalCount" class="micro">—</span>
+      </div>
+
+      <section id="decisiveRail" class="decisive-rail" data-status="idle" aria-live="polite" aria-label="自動売買の状態">
+        <div class="decisive-rail-head"><span class="micro">AUTO TRADING</span><strong id="onePassStatus">OFF</strong></div>
+        <p id="onePassMessage"></p>
+        <span id="onePassMeta" class="micro">AUTO OFF — TURN IT ON IN SETTINGS</span>
+      </section>
+
+      <!-- ポジション → 注文 → シナリオ の順で JS が積む。
+           静的なシナリオ行は置かない(古い内容が残る余地を作らないため)。 -->
+      <section id="stateStack" class="state-stack" aria-label="Verified server state" aria-live="polite"></section>
+
+      <!-- 市況。TradingView 流儀: 銘柄・足種・現在値を一行のヘッダに、
+           チャート本体は軸レーン付き。時間足ボタンと凡例は撤去した
+           (押しても 3m のまま・凡例の半分は入力が無く描かれない)。 -->
+      <div class="panel market cut">
+        <div class="panel-head">
+          <span class="chart-symbol">MNQ · 3m<i id="feedLed" class="led" aria-hidden="true"></i></span>
+          <!-- R56: チャートの高さ切替(表示のみ)。狭い画面で細部を読みたいときに広げる。 -->
+          <button id="chartExpand" class="chart-expand" type="button" aria-pressed="false" aria-label="チャートを広げる">
+            <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <strong id="marketPrice" class="price">—</strong>
+        </div>
+        <div class="tape-chart" aria-label="3分足チャート"></div>
+        <p id="marketStatus" class="micro-line">NO PRICE</p>
+        <!-- R58: 指標の読み取り値(旧 R56 凡例 8 行)は RADAR タブへ移した(radar.js)。 -->
+      </div>
+    </section>
+
+    <!-- R58: 市場レーダー。チャート下に 8 行並べていた指標の読み取り値を「価格の梯子 /
+         向き / 計測 / 時刻 / 結論」に組み直した専用画面。WATCH と排他表示。
+         中身は radar.js(表示専用 — market を読むだけで判定も発注もしない)。 -->
+    <section id="radarView" class="radar-view" hidden aria-label="市場レーダー">
+      <div class="section-label">
+        <span class="micro">RADAR</span>
+        <span id="radarState" class="micro">—</span>
+      </div>
+      <div id="radarBody" class="radar-body"></div>
+    </section>
+
+    <!-- 決済記録。WATCH と排他表示。データは view.recentResults のみ(正本はサーバー)。 -->
+    <section id="ledgerView" class="ledger-view" hidden aria-label="決済記録">
+      <div class="section-label">
+        <span class="micro">LEDGER</span>
+        <span id="ledgerCount" class="micro">—</span>
+      </div>
+      <div id="ledgerBody"></div>
+    </section>
+
+    <!-- R55: 経路の接続状況(SYSTEM ROUTE)。TradingView → 監視ループ → 評価 →
+         Cloudflare → この端末、AUTO 権限 → エンジン → ブローカー → 口座名簿。
+         表示専用 — 届いた view とアプリ自身の接続状態から導くだけで、
+         注文・保存・購読の変更は一切しない。中身は renderSystemRoute が組み立てる。 -->
+    <section id="systemView" class="system-view" hidden aria-label="システム経路">
+      <div class="section-label">
+        <span class="micro">SYSTEM</span>
+        <span id="systemState" class="micro">—</span>
+      </div>
+      <div id="systemBody"></div>
+    </section>
+
+    <!-- 設定。AUTO は Worker の期限付き権限、ULTRA は端末保存の表示/サイズ意図。 -->
+    <section id="settingsView" class="settings-view" hidden aria-label="設定">
+      <div class="section-label">
+        <span class="micro">SETTINGS</span>
+        <span id="settingsState" class="micro">—</span>
+      </div>
+
+      <!-- モードカード。名前 + スイッチだけ。ON のときカード全体が点灯する。 -->
+      <article class="mode-card mode-card-auto">
+        <div class="mode-card-head">
+          <span class="mode-card-glyph" aria-hidden="true"><svg class="glyph" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M16.8 9.2a5.4 5.4 0 0 0-9.2-1.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" opacity=".55"/></svg></span>
+          <p class="mode-card-name">AUTO</p>
+        </div>
+        <button id="onePassToggle" class="mode-switch" type="button" role="switch" aria-checked="false" aria-label="AUTO"><i></i></button>
+      </article>
+
+      <!-- AUTO の残り時間と延長。カード本体は「名前+スイッチだけ」の規律を
+           守るため外に置く。延長は setAutotrade(true) の再発行で、TTL は
+           Worker 側の上限で必ずクランプされる。 -->
+      <div id="autoExtendRow" class="auto-extend" hidden>
+        <span id="autoExtendInfo" class="micro">—</span>
+        <button id="autoExtendBtn" type="button">EXTEND +7H</button>
+      </div>
+
+      <article class="mode-card mode-card-ultra">
+        <div class="mode-card-head">
+          <span class="mode-card-glyph ultra-icon" aria-hidden="true"></span>
+          <p class="mode-card-name">ULTRA</p>
+        </div>
+        <button id="ultraToggle" class="mode-switch mode-switch-ultra" type="button" role="switch" aria-checked="false" aria-label="ULTRA"><i></i></button>
+      </article>
+
+      <!-- 音声キュー(R54)。武装・注文・約定・TP1・決済を一声で読む端末側の
+           表示設定 —— 発注権限ではない。ON にした瞬間のタップで再生を解錠する。 -->
+      <article class="mode-card mode-card-sound">
+        <div class="mode-card-head">
+          <span class="mode-card-glyph" aria-hidden="true"><svg class="glyph" viewBox="0 0 24 24"><path d="M4 9.5v5h3.6L12 18.6V5.4L7.6 9.5H4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M15.2 9.2a3.6 3.6 0 0 1 0 5.6M17.8 6.6a7.2 7.2 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+          <p class="mode-card-name">SOUND</p>
+        </div>
+        <button id="soundToggle" class="mode-switch mode-switch-sound" type="button" role="switch" aria-checked="false" aria-label="SOUND"><i></i></button>
+      </article>
+
+      <!-- 口座別 ULTRA 設定。対象は同時に1口座だけ(claim scope 制約)。
+           保存先は Worker/Durable Object — 監視PCが毎サイクル読み、達成不能な
+           シナリオは見送りになる。中身は renderUltraAccounts が組み立てる。 -->
+      <div id="ultraAccounts" class="ultra-accounts" hidden></div>
+    </section>
+  </main>
+
+  <!-- R65: 目の駐在所(ペット)。待機紋章の目がカードから消えている間だけ、広い画面の
+       左下の空きへ移って住む。吹き出しは pet.js が場面から選ぶ独り言で、表示専用
+       (view を読むだけ・注文にも保存にも触れない)。狭い画面では出さない。 -->
+  <aside id="petDen" class="pet-den" hidden aria-hidden="true">
+    <div class="pet-bubble"><p id="petSay" class="pet-say" data-type data-caret="eye"></p></div>
+    <div id="petPerch" class="pet-perch" title="poke">
+      <div id="petEye" class="pet-eye"></div>
+      <i class="pet-shadow" aria-hidden="true"></i>
+    </div>
+  </aside>
+
+  <!-- 画面切り替えドック。発注経路には一切触れない(表示の切替のみ)。 -->
+  <nav class="dock" aria-label="views">
+    <button type="button" class="dock-tab is-active" data-view="watch">
+      <svg class="dock-ic ic-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle class="ic-iris" cx="12" cy="12" r="2.7"/></svg>
+      <span>WATCH</span><i aria-hidden="true"></i>
+    </button>
+    <button type="button" class="dock-tab" data-view="radar">
+      <svg class="dock-ic ic-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="4.4"/><path d="M12 12l5.6-6.6"/><circle class="ic-iris" cx="12" cy="12" r="1.3"/></svg>
+      <span>RADAR</span><i aria-hidden="true"></i>
+    </button>
+    <button type="button" class="dock-tab" data-view="ledger">
+      <svg class="dock-ic ic-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12v17H6z"/><path d="M9 8.5h6M9 12h6M9 15.5h4"/></svg>
+      <span>LEDGER</span><i aria-hidden="true"></i>
+    </button>
+    <button type="button" class="dock-tab" data-view="system">
+      <svg class="dock-ic ic-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M7 7.2 10.6 16M17 7.2 13.4 16M7.2 6h9.6"/></svg>
+      <span>SYSTEM</span><i aria-hidden="true"></i>
+    </button>
+    <button type="button" class="dock-tab" data-view="settings">
+      <svg class="dock-ic ic-stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.4 5.4l2.1 2.1M16.5 16.5l2.1 2.1M18.6 5.4l-2.1 2.1M7.5 16.5l-2.1 2.1"/></svg>
+      <span>SETTINGS</span><i aria-hidden="true"></i>
+    </button>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- 夜警の御神籤(OMEN)。Balance の数字タップで開く純装飾の遊び。
+       日付で決まる「今夜の一枚」をスロット風に引く。判断系とは無接続。 -->
+  <div id="omen" hidden>
+    <div class="omen-card">
+      <span class="omen-title"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21l8.5-8.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M6 21l4-4M3 18l4-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" opacity=".5"/><circle cx="15.5" cy="8.5" r="5" fill="currentColor"/></svg> 夜警の御神籤</span>
+      <img alt="" decoding="async">
+      <p class="omen-line"></p>
+      <span class="omen-hint">タップで閉じる</span>
+    </div>
+  </div>
+
+  <!-- 決済結果画面。既定は非表示で、result が publish されたときだけ開く。
+       id は原本(nqx-result-display.html)のまま。既存 UI とは衝突しない。 -->
+  <section id="resultView" hidden aria-label="決済結果">
+    <div class="card">
+      <!-- GIF ステッカー背景(canvas の下)。canvas は gif モードでは透過で軌跡だけを描く -->
+      <img id="hero-gif" class="hero-gif" alt="" aria-hidden="true" decoding="async">
+      <canvas id="hero"></canvas>
+      <div class="surface"><i class="screen"></i><i class="tooth"></i><i class="grade"></i></div>
+      <div class="scrim"></div>
+      <div class="result-bar">
+        <!-- 観測が両端しか無いときに、その事実を隠さないためのチップ -->
+        <span id="result-note" hidden></span>
+        <button id="result-type" type="button">GIF</button>
+        <button id="result-close" type="button">CLOSE</button>
+      </div>
+      <div class="ui">
+        <div class="eyebrow">
+          <span class="mark">NQX <i>/ NIGHTWATCH</i></span>
+          <span class="stamp" id="stamp">FILED</span>
+        </div>
+        <div class="spacer"></div>
+        <!-- R57: 結果プレート。金額(#pill は互換のため id を保つ)+ 内訳 + R リング -->
+        <div class="plate" id="plate">
+          <div class="plate-main">
+            <div class="amount" id="pill">—</div>
+            <div class="sub" id="sub"></div>
+          </div>
+          <svg class="ring" id="ring" viewBox="0 0 100 100" aria-hidden="true"></svg>
+        </div>
+        <p class="verdict" id="verdict"></p>
+        <!-- R57: 根拠(モデル・等級・根拠タグ・減点)。chart が無い旧 result では空のまま -->
+        <div class="rationale" id="rationale" hidden></div>
+        <div class="rows" id="rows"></div>
+        <div class="foot">
+          <span id="f-left"></span><span id="f-right"></span>
+        </div>
+        <button class="act" id="save">SAVE CARD</button>
+      </div>
+    </div>
+    <div class="sheet" id="sheet" role="dialog" aria-label="カードを保存">
+      <img id="sheet-img" alt="NQX result card">
+      <p>画像を長押しして保存</p>
+      <button id="sheet-close">CLOSE</button>
+    </div>
+  </section>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

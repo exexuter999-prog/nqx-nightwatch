@@ -1,0 +1,8 @@
+# 自動生成 — 直接編集しない。scripts/gen-headers.mjs が npm run build のたびに書き直す。
+# connect-src の宛先は .secrets/nqx_cloud.env の NQX_API_BASE から来る。
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://nqx-nightwatch-api.exexuter999.workers.dev wss://nqx-nightwatch-api.exexuter999.workers.dev; worker-src 'self' blob:
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: accelerometer=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=()

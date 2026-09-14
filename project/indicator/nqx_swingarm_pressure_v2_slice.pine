@@ -1,0 +1,145 @@
+//@version=6
+indicator("NQX SwingArm Pressure V2 — CT Geometry Slice 0.1", overlay = true, max_bars_back = 5000, max_boxes_count = 10)
+
+// Phase gate:
+// This file implements only the CT geometry required to compare against the
+// public Blackflag FTS reference. HTF, score, labels, tables, alerts, JSON and
+// Nightwatch integration are intentionally excluded until geometry is proven.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+string GROUP_ENGINE = "CT ENGINE — REFERENCE GEOMETRY"
+string GROUP_VIEW   = "DISPLAY"
+
+string trailType = input.string("modified", "Trail type", options = ["modified", "unmodified"], group = GROUP_ENGINE)
+int atrPeriod = input.int(28, "ATR period", minval = 2, maxval = 200, group = GROUP_ENGINE)
+float atrFactor = input.float(5.0, "ATR factor", minval = 0.1, maxval = 20.0, step = 0.1, group = GROUP_ENGINE)
+float fib1Pct = input.float(61.8, "Fib 1 (%)", minval = 0.0, maxval = 100.0, step = 0.1, group = GROUP_ENGINE)
+float fib2Pct = input.float(78.6, "Fib 2 (%)", minval = 0.0, maxval = 100.0, step = 0.1, group = GROUP_ENGINE)
+float fib3Pct = input.float(88.6, "Fib 3 (%)", minval = 0.0, maxval = 100.0, step = 0.1, group = GROUP_ENGINE)
+
+bool showDynamicBand = input.bool(true, "Show dynamic stair band", group = GROUP_VIEW)
+bool showTrail = input.bool(true, "Show trail", group = GROUP_VIEW)
+bool showExtreme = input.bool(false, "Show extremum comparison dots", group = GROUP_VIEW)
+bool showFrozen = input.bool(true, "Show latest frozen prior arm", group = GROUP_VIEW)
+int warmupBars = input.int(0, "Warm-up bars (0 = reference-compatible)", minval = 0, maxval = 1000, group = GROUP_VIEW)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure series engine. It returns scalars only; drawing objects are managed in
+// chart context. State changes are accepted only on a confirmed chart bar.
+// ─────────────────────────────────────────────────────────────────────────────
+f_engineSeries(int _length, float _factor, bool _modified, float _fib1, float _fib2, float _fib3, int _warmup) =>
+    float barRange = high - low
+    float hiLo = math.min(barRange, 1.5 * nz(ta.sma(barRange, _length)))
+    float hRef = low <= high[1] ? high - close[1] : (high - close[1]) - 0.5 * (low - high[1])
+    float lRef = high >= low[1] ? close[1] - low : (close[1] - low) - 0.5 * (low[1] - high)
+    float trueRange = _modified ? math.max(hiLo, math.max(hRef, lRef)) : math.max(barRange, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+
+    // Deliberately uses the public reference's zero-seeded Wilder recursion.
+    float wildAtr = 0.0
+    wildAtr := barstate.isconfirmed ? nz(wildAtr[1]) + (trueRange - nz(wildAtr[1])) / _length : nz(wildAtr[1])
+
+    float loss = _factor * wildAtr
+    float upCandidate = close - loss
+    float downCandidate = close + loss
+
+    float trendUp = upCandidate
+    trendUp := barstate.isconfirmed ? (close[1] > trendUp[1] ? math.max(upCandidate, trendUp[1]) : upCandidate) : nz(trendUp[1], upCandidate)
+
+    float trendDown = downCandidate
+    trendDown := barstate.isconfirmed ? (close[1] < trendDown[1] ? math.min(downCandidate, trendDown[1]) : downCandidate) : nz(trendDown[1], downCandidate)
+
+    int trend = 1
+    trend := barstate.isconfirmed ? (close > trendDown[1] ? 1 : close < trendUp[1] ? -1 : nz(trend[1], 1)) : nz(trend[1], 1)
+    float trail = trend == 1 ? trendUp : trendDown
+
+    bool flippedUp = ta.crossover(trend, 0)
+    bool flippedDown = ta.crossunder(trend, 0)
+    bool flip = barstate.isconfirmed and (flippedUp or flippedDown)
+
+    float extreme = 0.0
+    extreme := barstate.isconfirmed ? (flippedUp ? high : flippedDown ? low : trend == 1 ? math.max(extreme[1], high) : trend == -1 ? math.min(extreme[1], low) : extreme[1]) : nz(extreme[1])
+
+    int armId = 0
+    armId := flip ? nz(armId[1]) + 1 : nz(armId[1])
+    int armAge = 0
+    armAge := flip ? 0 : barstate.isconfirmed ? nz(armAge[1]) + 1 : nz(armAge[1])
+
+    float f1 = extreme + (trail - extreme) * _fib1 / 100.0
+    float f2 = extreme + (trail - extreme) * _fib2 / 100.0
+    float f3 = extreme + (trail - extreme) * _fib3 / 100.0
+    bool ready = bar_index >= _warmup and not na(trail) and not na(extreme) and not na(f1) and not na(f2) and not na(f3)
+
+    [ready ? trend : na, ready ? trail : na, ready ? extreme : na, ready ? f1 : na, ready ? f2 : na, ready ? f3 : na, ready ? wildAtr : na, ready and flip, armId, armAge, ready]
+
+[ctTrend, ctTrail, ctExtreme, ctF1, ctF2, ctF3, ctAtr, ctFlip, ctArmId, ctArmAge, ctReady] = f_engineSeries(atrPeriod, atrFactor, trailType == "modified", fib1Pct, fib2Pct, fib3Pct, warmupBars)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dynamic stair band. The four boundaries are the data-window outputs too.
+// ─────────────────────────────────────────────────────────────────────────────
+color bullLine = color.rgb(137, 196, 157)
+color bearLine = color.rgb(219, 142, 149)
+color trailLine = color.rgb(236, 239, 244)
+color sideLine = ctTrend == 1 ? bullLine : bearLine
+color fillOuter = ctTrend == 1 ? color.new(color.rgb(24, 105, 62), 79) : color.new(color.rgb(132, 32, 43), 79)
+color fillMiddle = ctTrend == 1 ? color.new(color.rgb(21, 128, 61), 72) : color.new(color.rgb(157, 36, 48), 72)
+color fillDeep = ctTrend == 1 ? color.new(color.rgb(22, 163, 74), 64) : color.new(color.rgb(185, 43, 57), 64)
+
+pF1 = plot(showDynamicBand and ctReady ? ctF1 : na, "CT Fib 61.8", color = sideLine, linewidth = 1)
+pF2 = plot(showDynamicBand and ctReady ? ctF2 : na, "CT Fib 78.6", color = sideLine, linewidth = 1)
+pF3 = plot(showDynamicBand and ctReady ? ctF3 : na, "CT Fib 88.6", color = trailLine, linewidth = 1)
+pTrail = plot((showDynamicBand or showTrail) and ctReady ? ctTrail : na, "CT Trail / 100", color = showTrail ? trailLine : color.new(trailLine, 100), linewidth = 2)
+
+fill(pF1, pF2, color = showDynamicBand ? fillOuter : na, title = "CT 61.8–78.6")
+fill(pF2, pF3, color = showDynamicBand ? fillMiddle : na, title = "CT 78.6–88.6")
+fill(pF3, pTrail, color = showDynamicBand ? fillDeep : na, title = "CT 88.6–100")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One immutable prior-arm snapshot. It must use [1] values because the current
+// flip bar already belongs to the new arm. This slice keeps only the latest one.
+// ─────────────────────────────────────────────────────────────────────────────
+var float frozenTrail = na
+var float frozenExtreme = na
+var float frozenF1 = na
+var float frozenF2 = na
+var float frozenF3 = na
+var int frozenDirection = 0
+var int frozenSourceArmId = na
+var int frozenAtTime = na
+var box frozenBox = na
+
+if ctFlip and not na(ctF1[1]) and not na(ctTrail[1])
+    frozenTrail := ctTrail[1]
+    frozenExtreme := ctExtreme[1]
+    frozenF1 := ctF1[1]
+    frozenF2 := ctF2[1]
+    frozenF3 := ctF3[1]
+    frozenDirection := int(ctTrend[1])
+    frozenSourceArmId := ctArmId[1]
+    frozenAtTime := time[1]
+
+    if not na(frozenBox)
+        box.delete(frozenBox)
+    if showFrozen
+        float frozenTop = math.max(frozenF1, frozenTrail)
+        float frozenBottom = math.min(frozenF1, frozenTrail)
+        color frozenSide = frozenDirection == 1 ? bullLine : bearLine
+        color frozenFill = frozenDirection == 1 ? color.new(color.rgb(24, 105, 62), 86) : color.new(color.rgb(132, 32, 43), 86)
+        frozenBox := box.new(left = bar_index, top = frozenTop, right = bar_index + 1, bottom = frozenBottom, xloc = xloc.bar_index, extend = extend.right, border_color = color.new(frozenSide, 28), border_width = 1, bgcolor = frozenFill)
+
+// Diagnostics. Boundary plots above already supply f1/f2/f3/trail.
+plot(ctExtreme, "CT Extreme", color = showExtreme ? (ctTrend == 1 ? color.lime : color.fuchsia) : color.new(color.white, 100), linewidth = 3, style = plot.style_circles)
+plot(ctAtr, "CT Wilder ATR", display = display.data_window)
+plot(ctTrend, "CT Trend (+1/-1)", display = display.data_window)
+plot(ctArmId, "CT Arm ID", display = display.data_window)
+plot(ctArmAge, "CT Arm Age", display = display.data_window)
+plot(ctFlip ? 1 : 0, "CT Confirmed Flip", display = display.data_window)
+plot(frozenTrail, "Frozen Prior Trail", display = display.data_window)
+plot(frozenExtreme, "Frozen Prior Extreme", display = display.data_window)
+plot(frozenF1, "Frozen Prior Fib 61.8", display = display.data_window)
+plot(frozenF2, "Frozen Prior Fib 78.6", display = display.data_window)
+plot(frozenF3, "Frozen Prior Fib 88.6", display = display.data_window)
+plot(frozenDirection, "Frozen Prior Direction", display = display.data_window)
+plot(frozenSourceArmId, "Frozen Source Arm ID", display = display.data_window)
+plot(frozenAtTime, "Frozen Source Time", display = display.data_window)

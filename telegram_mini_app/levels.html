@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer">
+    <title>NQX // LEVELS</title>
+    <style>
+      /* 本体の styles.css は読まない。この面は独立して軽くしておく。 */
+      :root {
+        --bg: #0b0c0e;
+        --panel: #131722;
+        --bone: #c9c5ba;
+        --muted: #8f8b81;
+        --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--bone);
+        font-family: var(--mono);
+        -webkit-font-smoothing: antialiased;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 10px 12px;
+        background: linear-gradient(var(--bg) 70%, transparent);
+      }
+      h1 { margin: 0; font-size: 12px; letter-spacing: .18em; color: var(--bone); }
+      #status { font-size: 10px; color: var(--muted); margin-left: auto; letter-spacing: .1em; }
+      #status.is-stale { color: #ef5350; }
+      #meta { padding: 0 12px 8px; font-size: 10px; color: var(--muted); }
+      #levels { padding: 0 4px 24px; }
+      #levels svg { width: 100%; height: auto; display: block; }
+      footer { padding: 12px; font-size: 9px; color: var(--muted); line-height: 1.6; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>NQX // LEVELS</h1>
+      <span id="status">…</span>
+    </header>
+    <div id="meta"></div>
+    <div id="levels"></div>
+    <footer>
+      意識している水準を間引かずに全部出す面。発注はできない —— 本体アプリで行う。
+    </footer>
+    <script type="module" src="./levels.js"></script>
+  </body>
+</html>

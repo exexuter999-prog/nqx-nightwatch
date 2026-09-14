@@ -1,0 +1,6 @@
+!NQX/1
+M|sy=MNQ1!|tf=3M/15M/45M|at=2026-07-20 18:00 JST|ss=CME NEW YORK|sf=3M,15M,45M|dq=M|px=28957.50|qm=H|na=rm,sn,pe,br,pp,ui,bp,ge,cm,ne,ce,sz|xf=UNKNOWN FUTURE PROPRIETARY LABEL — KEEP LITERAL
+E|ev=MISSING|src=UNVERIFIED|rule=検証済みイベント時刻がない間は新規執行しない
+Z|s=28898,28835.38,28814|r=28939.75,28951,28964,29047
+G|n=1|ip=現在は待機。次の30分はEntry帯での受容または拒否のみを監視する|mx=NOT REQUIRED|io=S1 LONG: SL 28927.75 < 無効化 28939.75 < エントリー下限 28951|nr=Entry帯での受容または拒否|rn=修復回帰テスト用パケット
+S1|n=修復対象ロング|d=L|st=W|su=PC|ha=M|lt=LEVEL|zq=U|fr=U|tr=28951上の15M実体受容|co=28951..28964の3Mリテスト維持|en=28951..28964|sl=28927.75|tp=29047,29059.00,29089|rr=3.01,3.41,4.42|iv=15M実体が28939.75を下回って確定した時点で無効化|od=Trigger・Confirmation・Fill成立後、Valid UntilまでにSLより先にTP1到達でSUCCESS|vu=2026-07-20 20:00 (タイムゾーン欠落)|eh=^NOENT(18:00,20:00);検証済みイベント時刻がない間は新規執行しない|fm=Entry帯受容後に28939.75を実体で失う|sd=28939.75下の15M実体確定で見送り|ef=修復回帰テスト用の指定価格配置|ea=市場根拠は付与しない|cc=指定Entry=OBSERVED → 指定Invalidation=OBSERVED → 指定SL=OBSERVED|no=TEST FIXTURE ONLY|zf=ANOTHER UNKNOWN FIELD TO PRESERVE

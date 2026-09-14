@@ -1,0 +1,490 @@
+//@version=6
+indicator("NQX ATR Pressure Map v1.5", "NQX ATR Pressure", overlay = true, max_labels_count = 50)
+
+// NQ Nightwatch clean-room indicator.
+// It uses standard ATR-trailing-stop, retracement, EMA, volume and confirmed-HTF
+// concepts. It does not contain SwingArm source code and does not report a win rate.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs — defaults are tuned for the Nightwatch 3m / 15m / 45m workflow.
+// ─────────────────────────────────────────────────────────────────────────────
+groupEngine = "01 · NQX Engine"
+trailKernel = input.string("MODIFIED FTS", "ATR trail kernel", options = ["MODIFIED FTS", "STANDARD ATR"], group = groupEngine)
+atrLength   = input.int(28, "ATR length", minval = 5, maxval = 100, group = groupEngine)
+atrFactor   = input.float(3.0, "ATR trail factor", minval = 0.5, maxval = 10.0, step = 0.25, group = groupEngine)
+tfProfile   = input.string("NIGHTWATCH AUTO", "Timeframe profile", options = ["NIGHTWATCH AUTO", "MANUAL"], group = groupEngine)
+manualHtf1  = input.timeframe("15", "Manual structure timeframe", group = groupEngine)
+manualHtf2  = input.timeframe("45", "Manual context timeframe", group = groupEngine)
+emaFastLen  = input.int(8, "Fast EMA", minval = 2, group = groupEngine)
+emaMidLen   = input.int(21, "Mid EMA", minval = 3, group = groupEngine)
+emaSlowLen  = input.int(55, "Slow EMA", minval = 5, group = groupEngine)
+volumeLen   = input.int(30, "Relative-volume baseline", minval = 5, group = groupEngine)
+
+groupZone = "02 · Zone and risk geometry"
+fibEarly        = input.float(61.8, "Early boundary (%)", minval = 1, maxval = 99, step = 0.1, group = groupZone)
+fibDeep         = input.float(78.6, "Deep boundary (%)", minval = 1, maxval = 99, step = 0.1, group = groupZone)
+fibExtreme      = input.float(88.6, "Extreme boundary (%)", minval = 1, maxval = 99, step = 0.1, group = groupZone)
+stopBufferAtr   = input.float(0.20, "Hard-stop buffer (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = groupZone)
+freshBars       = input.int(40, "Fresh-zone age limit (chart bars)", minval = 1, maxval = 500, group = groupZone)
+rearmAtr        = input.float(1.0, "Consumed-zone rearm excursion (ATR)", minval = 0.25, maxval = 5.0, step = 0.25, group = groupZone)
+pressureGate    = input.int(72, "High-pressure score gate", minval = 50, maxval = 95, group = groupZone)
+requireTwoFrame = input.bool(true, "Require at least 2/3 trend alignment", group = groupZone)
+staleZoneAtr    = input.float(6.0, "Hide zone beyond this distance (ATR multiples)", minval = 1.0, maxval = 20.0, step = 0.5, group = groupZone)
+approachAtr     = input.float(1.0, "Zone approach highlight distance (ATR)", minval = 0.25, maxval = 5.0, step = 0.25, group = groupZone)
+
+groupDisplay = "03 · Display"
+displayProfile = input.string("NIGHTWATCH AUTO", "Layer profile", options = ["NIGHTWATCH AUTO", "FULL MAP", "CT FOCUS", "OUTLINE CAPTURE"], group = groupDisplay)
+showZone     = input.bool(true, "Show active retracement zone", group = groupDisplay)
+showStructureZone = input.bool(true, "Show structure-timeframe zone", group = groupDisplay)
+showContextZone = input.bool(true, "Show context-timeframe zone", group = groupDisplay)
+showConsumed = input.bool(false, "Show consumed zones", group = groupDisplay)
+showStaleGhost = input.bool(true, "Show stale-zone ghost outline", group = groupDisplay)
+outlineOnly  = input.bool(false, "Outline-only capture mode", group = groupDisplay)
+showFibLines = input.bool(true, "Show 61.8 / 78.6 / 88.6 lines", group = groupDisplay)
+showTrail    = input.bool(true, "Show structural invalidation trail", group = groupDisplay)
+showExtreme  = input.bool(false, "Show current swing extremum", group = groupDisplay)
+showSignals  = input.bool(true, "Show confirmed rejection markers", group = groupDisplay)
+showLiveLabel = input.bool(true, "Show exact current-zone label", group = groupDisplay)
+showTable    = input.bool(true, "Show NQX truth table", group = groupDisplay)
+zoneOpacity  = input.int(88, "Zone transparency", minval = 70, maxval = 100, group = groupDisplay)
+historyMode  = input.string("RECENT", "Zone history", options = ["RECENT", "ALL"], group = groupDisplay)
+recentBars   = input.int(180, "Recent history bars", minval = 20, maxval = 2000, group = groupDisplay)
+
+groupAlerts = "04 · Alerts / export"
+enableDynamicAlert = input.bool(false, "Emit JSON alert() on confirmed rejection", group = groupAlerts)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Standard ATR trailing engine plus one frozen-zone lifecycle per timeframe.
+// Higher-timeframe calls use only completed bars.
+// ─────────────────────────────────────────────────────────────────────────────
+f_zoneEngine(_length, _factor, _modified, _fibEarly, _fibDeep, _fibExtreme, _rearmAtr) =>
+    _barRange = high - low
+    _meanRange = ta.sma(_barRange, _length)
+    _hiLo = math.min(_barRange, 1.5 * nz(_meanRange))
+    _hRef = low <= high[1] ? high - close[1] : high - close[1] - 0.5 * (low - high[1])
+    _lRef = high >= low[1] ? close[1] - low : close[1] - low - 0.5 * (low[1] - high)
+    _modifiedTr = math.max(_hiLo, math.max(_hRef, _lRef))
+    var float _wildAtr = 0.0
+    _wildAtr := nz(_wildAtr[1]) + (_modifiedTr - nz(_wildAtr[1])) / _length
+    _atr = _modified ? _wildAtr : ta.atr(_length)
+    _rawUp = close - _factor * _atr
+    _rawDn = close + _factor * _atr
+    var float _up = na
+    var float _dn = na
+    var int _trend = 1
+    _up := na(_up[1]) ? _rawUp : close[1] > _up[1] ? math.max(_rawUp, _up[1]) : _rawUp
+    _dn := na(_dn[1]) ? _rawDn : close[1] < _dn[1] ? math.min(_rawDn, _dn[1]) : _rawDn
+    _trend := na(_trend[1]) ? 1 : close > _dn[1] ? 1 : close < _up[1] ? -1 : _trend[1]
+    _trail = _trend == 1 ? _up : _dn
+    _flipLong = _trend == 1 and nz(_trend[1], 1) == -1
+    _flipShort = _trend == -1 and nz(_trend[1], 1) == 1
+    var float _extreme = na
+    _extreme := _flipLong ? high : _flipShort ? low : _trend == 1 ? math.max(nz(_extreme[1], high), high) : math.min(nz(_extreme[1], low), low)
+    _candidate618 = _extreme + (_trail - _extreme) * _fibEarly / 100.0
+    _candidate786 = _extreme + (_trail - _extreme) * _fibDeep / 100.0
+    _candidate886 = _extreme + (_trail - _extreme) * _fibExtreme / 100.0
+    _trendFlip = _trend != _trend[1]
+    var bool _zoneActive = false
+    var float _level618 = na
+    var float _level786 = na
+    var float _level886 = na
+    var float _zoneInvalidation = na
+    var float _zoneAtr = na
+    var int _trendBirthBar = na
+    var int _zoneBirthTime = na
+    var int _visitCount = 0
+    var int _deepestTouch = 0
+    var int _consumedBar = na
+    var float _consumedExtreme = na
+    if _trendFlip or na(_trendBirthBar)
+        _trendBirthBar := bar_index
+        _zoneActive := false
+        _level618 := na
+        _level786 := na
+        _level886 := na
+        _zoneInvalidation := na
+        _zoneAtr := na
+        _zoneBirthTime := na
+        _visitCount := 0
+        _deepestTouch := 0
+        _consumedBar := na
+        _consumedExtreme := na
+    _pullbackStart = _trend == 1 ? close < open and low < low[1] : close > open and high > high[1]
+    _snapshotReady = not na(_candidate618[1]) and not na(_candidate786[1]) and not na(_candidate886[1]) and not na(_trail[1]) and not na(_atr[1])
+    _armZone = not _zoneActive and barstate.isconfirmed and bar_index > _trendBirthBar and _pullbackStart and _snapshotReady
+    if _armZone
+        _zoneActive := true
+        _level618 := _candidate618[1]
+        _level786 := _candidate786[1]
+        _level886 := _candidate886[1]
+        _zoneInvalidation := _trail[1]
+        _zoneAtr := _atr[1]
+        _zoneBirthTime := time
+        _visitCount := 0
+        _deepestTouch := 0
+        _consumedBar := na
+        _consumedExtreme := na
+    _zoneLow = _zoneActive ? math.min(_level618, _level886) : na
+    _zoneHigh = _zoneActive ? math.max(_level618, _level886) : na
+    _intersects = _zoneActive and high >= _zoneLow and low <= _zoneHigh
+    _visitStart = barstate.isconfirmed and _zoneActive and _intersects and not _intersects[1]
+    if _visitStart
+        _priorVisits = _visitCount
+        _visitCount += 1
+        if _priorVisits < 3 and _visitCount >= 3
+            _consumedBar := bar_index
+            _consumedExtreme := _extreme
+    if barstate.isconfirmed and _intersects
+        _bodyHighNow = math.max(open, close)
+        _bodyLowNow = math.min(open, close)
+        _bodyInsideNow = _bodyHighNow >= _zoneLow and _bodyLowNow <= _zoneHigh
+        _deepNow = _trend == 1 ? low <= _level886 : high >= _level886
+        _deepestTouch := math.max(_deepestTouch, _bodyInsideNow ? (_deepNow ? 3 : 2) : 1)
+    _rearmDistance = nz(_zoneAtr, _atr) * _rearmAtr
+    _rearmZone = _zoneActive and barstate.isconfirmed and _visitCount >= 3 and not na(_consumedBar) and bar_index > _consumedBar and (_trend == 1 ? _extreme >= _consumedExtreme + _rearmDistance : _extreme <= _consumedExtreme - _rearmDistance)
+    if _rearmZone
+        _zoneActive := false
+        _level618 := na
+        _level786 := na
+        _level886 := na
+        _zoneInvalidation := na
+        _zoneAtr := na
+        _zoneBirthTime := na
+        _visitCount := 0
+        _deepestTouch := 0
+        _consumedBar := na
+        _consumedExtreme := na
+    [_trend, _trail, _extreme, _atr, close, _zoneActive ? 1 : 0, _level618, _level786, _level886, _zoneInvalidation, _zoneAtr, _zoneBirthTime, _visitCount, _deepestTouch, _consumedExtreme]
+
+f_confirmedZoneEngine(_length, _factor, _modified, _fibEarly, _fibDeep, _fibExtreme, _rearmAtr) =>
+    [_t, _trail, _extreme, _atr, _close, _active, _l618, _l786, _l886, _inv, _zatr, _birth, _visits, _deepest, _consumed] = f_zoneEngine(_length, _factor, _modified, _fibEarly, _fibDeep, _fibExtreme, _rearmAtr)
+    [_t[1], _trail[1], _extreme[1], _atr[1], _close[1], _active[1], _l618[1], _l786[1], _l886[1], _inv[1], _zatr[1], _birth[1], _visits[1], _deepest[1], _consumed[1]]
+
+useModifiedTrail = trailKernel == "MODIFIED FTS"
+[ctTrend, ctTrail, ctExtreme, ctAtr, ctClose, ctActiveRaw, ctLevel618, ctLevel786, ctLevel886, ctZoneInvalidation, ctZoneAtr, ctZoneBirthTime, ctVisits, ctDeepestTouch, ctConsumedExtreme] = f_zoneEngine(atrLength, atrFactor, useModifiedTrail, fibEarly, fibDeep, fibExtreme, rearmAtr)
+chartSeconds = timeframe.in_seconds()
+f_autoStructure(_seconds) => _seconds <= 180 ? "15" : _seconds <= 900 ? "45" : _seconds <= 3600 ? "240" : _seconds <= 14400 ? "1D" : "1W"
+f_autoContext(_seconds) => _seconds <= 180 ? "45" : _seconds <= 900 ? "240" : _seconds <= 3600 ? "480" : _seconds <= 14400 ? "1W" : "1M"
+structureTf = tfProfile == "NIGHTWATCH AUTO" ? f_autoStructure(chartSeconds) : manualHtf1
+contextTf = tfProfile == "NIGHTWATCH AUTO" ? f_autoContext(chartSeconds) : manualHtf2
+h1Seconds = timeframe.in_seconds(structureTf)
+h2Seconds = timeframe.in_seconds(contextTf)
+if barstate.isfirst and (h1Seconds < chartSeconds or h2Seconds < h1Seconds)
+    runtime.error("NQX timeframe order must be chart <= Structure TF <= Context TF. For a 45m chart, change the defaults to 45m / 240m or higher.")
+[h1TrendRaw, h1TrailRaw, h1ExtremeRaw, h1AtrRaw, h1CloseRaw, h1ActiveRaw, h1Level618Raw, h1Level786Raw, h1Level886Raw, h1InvRaw, h1ZoneAtrRaw, h1BirthRaw, h1VisitsRaw, h1DeepestRaw, h1ConsumedRaw] = request.security(syminfo.tickerid, structureTf, f_confirmedZoneEngine(atrLength, atrFactor, useModifiedTrail, fibEarly, fibDeep, fibExtreme, rearmAtr), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[h2TrendRaw, h2TrailRaw, h2ExtremeRaw, h2AtrRaw, h2CloseRaw, h2ActiveRaw, h2Level618Raw, h2Level786Raw, h2Level886Raw, h2InvRaw, h2ZoneAtrRaw, h2BirthRaw, h2VisitsRaw, h2DeepestRaw, h2ConsumedRaw] = request.security(syminfo.tickerid, contextTf, f_confirmedZoneEngine(atrLength, atrFactor, useModifiedTrail, fibEarly, fibDeep, fibExtreme, rearmAtr), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+h1IsChart = timeframe.in_seconds(structureTf) == chartSeconds
+h2IsChart = timeframe.in_seconds(contextTf) == chartSeconds
+h1Trend = h1IsChart ? ctTrend : h1TrendRaw
+h1Trail = h1IsChart ? ctTrail : h1TrailRaw
+h1Extreme = h1IsChart ? ctExtreme : h1ExtremeRaw
+h1Atr = h1IsChart ? ctAtr : h1AtrRaw
+h1Close = h1IsChart ? close : h1CloseRaw
+h1ActiveRawFinal = h1IsChart ? ctActiveRaw : h1ActiveRaw
+h1Level618 = h1IsChart ? ctLevel618 : h1Level618Raw
+h1Level786 = h1IsChart ? ctLevel786 : h1Level786Raw
+h1Level886 = h1IsChart ? ctLevel886 : h1Level886Raw
+h1Inv = h1IsChart ? ctZoneInvalidation : h1InvRaw
+h1ZoneAtr = h1IsChart ? ctZoneAtr : h1ZoneAtrRaw
+h1Birth = h1IsChart ? ctZoneBirthTime : h1BirthRaw
+h1Visits = h1IsChart ? ctVisits : h1VisitsRaw
+h1Deepest = h1IsChart ? ctDeepestTouch : h1DeepestRaw
+h2Trend = h2IsChart ? ctTrend : h2TrendRaw
+h2Trail = h2IsChart ? ctTrail : h2TrailRaw
+h2Extreme = h2IsChart ? ctExtreme : h2ExtremeRaw
+h2Atr = h2IsChart ? ctAtr : h2AtrRaw
+h2Close = h2IsChart ? close : h2CloseRaw
+h2ActiveRawFinal = h2IsChart ? ctActiveRaw : h2ActiveRaw
+h2Level618 = h2IsChart ? ctLevel618 : h2Level618Raw
+h2Level786 = h2IsChart ? ctLevel786 : h2Level786Raw
+h2Level886 = h2IsChart ? ctLevel886 : h2Level886Raw
+h2Inv = h2IsChart ? ctZoneInvalidation : h2InvRaw
+h2ZoneAtr = h2IsChart ? ctZoneAtr : h2ZoneAtrRaw
+h2Birth = h2IsChart ? ctZoneBirthTime : h2BirthRaw
+h2Visits = h2IsChart ? ctVisits : h2VisitsRaw
+h2Deepest = h2IsChart ? ctDeepestTouch : h2DeepestRaw
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified chart / Structure / Context state derived from the same frozen-zone engine.
+// ─────────────────────────────────────────────────────────────────────────────
+zoneActive = ctActiveRaw == 1
+level618 = ctLevel618
+level786 = ctLevel786
+level886 = ctLevel886
+visitCount = ctVisits
+deepestTouch = ctDeepestTouch
+trendFlip = ctTrend != ctTrend[1]
+zoneLow = zoneActive ? math.min(level618, level886) : na
+zoneHigh = zoneActive ? math.max(level618, level886) : na
+zoneMid = zoneActive ? (zoneLow + zoneHigh) / 2.0 : na
+armZone = zoneActive and nz(ctActiveRaw[1], 0) != 1
+visitStart = zoneActive and ctVisits > nz(ctVisits[1], 0)
+firstVisit = visitStart and ctVisits == 1
+barsSinceFirstVisit = ta.barssince(firstVisit)
+visitAge = zoneActive and visitCount > 0 ? nz(barsSinceFirstVisit, 0) : 0
+zoneState = not zoneActive ? "BUILDING" : visitCount == 0 ? "ARMED" : visitCount >= 3 ? "CONSUMED" : deepestTouch == 1 and visitAge <= freshBars ? "FRESH VISIT" : deepestTouch == 1 ? "WICK TESTED" : deepestTouch == 2 ? "BODY TESTED" : "DEEP MITIGATION"
+
+h1Active = h1ActiveRawFinal == 1
+h1ZoneLow = h1Active ? math.min(h1Level618, h1Level886) : na
+h1ZoneHigh = h1Active ? math.max(h1Level618, h1Level886) : na
+h2Active = h2ActiveRawFinal == 1
+h2ZoneLow = h2Active ? math.min(h2Level618, h2Level886) : na
+h2ZoneHigh = h2Active ? math.max(h2Level618, h2Level886) : na
+
+// A zone whose band sits more than staleZoneAtr frozen-ATR multiples away from the
+// current close is "stale": abandoned by price, excluded from score, gates, risk
+// geometry and default rendering. Lifecycle state (visits/consumed/rearm) is untouched.
+f_zoneStale(_close, _zoneLow, _zoneHigh, _atr, _mult) =>
+    _dist = _close > _zoneHigh ? _close - _zoneHigh : _close < _zoneLow ? _zoneLow - _close : 0.0
+    _atr > 0 and _dist / _atr > _mult
+ctZoneStale = zoneActive and f_zoneStale(close, zoneLow, zoneHigh, ctZoneAtr, staleZoneAtr)
+h1ZoneStale = h1Active and f_zoneStale(close, h1ZoneLow, h1ZoneHigh, h1ZoneAtr, staleZoneAtr)
+h2ZoneStale = h2Active and f_zoneStale(close, h2ZoneLow, h2ZoneHigh, h2ZoneAtr, staleZoneAtr)
+
+// Distance from close to the frozen band in frozen-ATR multiples (0 inside the band).
+ctZoneAtrEff = nz(ctZoneAtr, ctAtr)
+ctZoneDistAtr = zoneActive and ctZoneAtrEff > 0 ? (close > zoneHigh ? close - zoneHigh : close < zoneLow ? zoneLow - close : 0.0) / ctZoneAtrEff : na
+ctApproach = zoneActive and not ctZoneStale and not na(ctZoneDistAtr) and ctZoneDistAtr <= approachAtr
+// Progress of a consumed zone toward its rearm excursion (0..1, capped for display).
+ctRearmProgress = zoneActive and visitCount >= 3 and not na(ctConsumedExtreme) and ctZoneAtrEff > 0 ? math.max(0.0, (ctTrend == 1 ? ctExtreme - ctConsumedExtreme : ctConsumedExtreme - ctExtreme) / (ctZoneAtrEff * rearmAtr)) : na
+
+longRejection = zoneActive and visitCount > 0 and zoneState != "CONSUMED" and ctTrend == 1 and low <= level786 and close > level618 and close > open
+shortRejection = zoneActive and visitCount > 0 and zoneState != "CONSUMED" and ctTrend == -1 and high >= level786 and close < level618 and close < open
+confirmedLong = barstate.isconfirmed and longRejection
+confirmedShort = barstate.isconfirmed and shortRejection
+crossUnder618 = ta.crossunder(close, level618)
+crossOver618 = ta.crossover(close, level618)
+crossUnder786 = ta.crossunder(close, level786)
+crossOver786 = ta.crossover(close, level786)
+crossUnder886 = ta.crossunder(close, level886)
+crossOver886 = ta.crossover(close, level886)
+fib618Touch = barstate.isconfirmed and ((ctTrend == 1 and crossUnder618) or (ctTrend == -1 and crossOver618))
+fib786Touch = barstate.isconfirmed and ((ctTrend == 1 and crossUnder786) or (ctTrend == -1 and crossOver786))
+fib886Touch = barstate.isconfirmed and ((ctTrend == 1 and crossUnder886) or (ctTrend == -1 and crossOver886))
+
+var int bullFlipCount = 0
+var int bearFlipCount = 0
+var int longRejectCount = 0
+var int shortRejectCount = 0
+if barstate.isconfirmed and trendFlip
+    bullFlipCount += ctTrend == 1 ? 1 : 0
+    bearFlipCount += ctTrend == -1 ? 1 : 0
+if confirmedLong
+    longRejectCount += 1
+if confirmedShort
+    shortRejectCount += 1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Explainable pressure score. This is setup confluence, never probability.
+// 30 MTF alignment + 25 zone interaction + 20 EMA structure + 10 volume
+// + 10 freshness + 5 confirmed rejection = 100 maximum.
+// ─────────────────────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, emaFastLen)
+emaMid = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+relativeVolume = volume / math.max(ta.sma(volume, volumeLen), 1.0)
+
+h1Unique = not h1IsChart
+h2Unique = not h2IsChart and contextTf != structureTf
+longAlignedFrames = (ctTrend == 1 ? 1 : 0) + (h1Unique and h1Trend == 1 ? 1 : 0) + (h2Unique and h2Trend == 1 ? 1 : 0)
+shortAlignedFrames = (ctTrend == -1 ? 1 : 0) + (h1Unique and h1Trend == -1 ? 1 : 0) + (h2Unique and h2Trend == -1 ? 1 : 0)
+longAlignment = longAlignedFrames * 10
+shortAlignment = shortAlignedFrames * 10
+zoneComponent = not zoneActive or ctZoneStale or visitCount == 0 or zoneState == "CONSUMED" ? 0 : deepestTouch == 1 ? 10 : deepestTouch == 2 ? 18 : 25
+longStructure = emaFast > emaMid and emaMid > emaSlow ? 20 : emaFast > emaMid ? 10 : 0
+shortStructure = emaFast < emaMid and emaMid < emaSlow ? 20 : emaFast < emaMid ? 10 : 0
+longVolume = relativeVolume >= 1.20 and close > open ? 10 : relativeVolume >= 1.0 and close > open ? 5 : 0
+shortVolume = relativeVolume >= 1.20 and close < open ? 10 : relativeVolume >= 1.0 and close < open ? 5 : 0
+freshnessPoints = ctZoneStale ? 0 : zoneState == "FRESH VISIT" ? 10 : zoneState == "WICK TESTED" ? 8 : zoneState == "BODY TESTED" ? 5 : zoneState == "DEEP MITIGATION" ? 3 : 0
+longScore = math.min(100, longAlignment + (ctTrend == 1 ? zoneComponent : 0) + longStructure + longVolume + freshnessPoints + (confirmedLong ? 5 : 0))
+shortScore = math.min(100, shortAlignment + (ctTrend == -1 ? zoneComponent : 0) + shortStructure + shortVolume + freshnessPoints + (confirmedShort ? 5 : 0))
+
+longGate = zoneActive and not ctZoneStale and visitCount > 0 and ctTrend == 1 and zoneState != "CONSUMED" and longScore >= pressureGate and (not requireTwoFrame or longAlignedFrames >= 2)
+shortGate = zoneActive and not ctZoneStale and visitCount > 0 and ctTrend == -1 and zoneState != "CONSUMED" and shortScore >= pressureGate and (not requireTwoFrame or shortAlignedFrames >= 2)
+zoneClass = not zoneActive ? (ctTrend == 1 ? "BUILDING BULL" : "BUILDING BEAR") : ctZoneStale ? (ctTrend == 1 ? "STALE BULL" : "STALE BEAR") : visitCount == 0 ? (ctTrend == 1 ? "ARMED BULL" : "ARMED BEAR") : longGate ? "HIGH BULL PRESSURE" : shortGate ? "HIGH BEAR PRESSURE" : ctTrend == 1 ? "REGULAR BULL" : "REGULAR BEAR"
+
+color highBull = color.rgb(48, 105, 255)
+color highBear = color.rgb(245, 183, 55)
+color regularBull = color.rgb(49, 178, 137)
+color regularBear = color.rgb(220, 72, 91)
+zoneGeometryColor = ctTrend == 1 ? regularBull : regularBear
+pressureColor = longGate ? highBull : shortGate ? highBear : zoneGeometryColor
+h1Color = h1Trend == 1 ? highBull : highBear
+h2Color = h2Trend == 1 ? color.rgb(81, 128, 240) : color.rgb(215, 108, 74)
+
+// Stale zones must not anchor risk: fall back to the live structural trail.
+invalidation = zoneActive and not ctZoneStale ? ctZoneInvalidation : ctTrail
+riskAtr = zoneActive and not ctZoneStale ? ctZoneAtr : ctAtr
+hardStop = ctTrend == 1 ? invalidation - riskAtr * stopBufferAtr : invalidation + riskAtr * stopBufferAtr
+renderWindow = historyMode == "ALL" or bar_index >= last_bar_index - recentBars
+profileShowsHtf = displayProfile != "CT FOCUS"
+profileOutline = displayProfile == "OUTLINE CAPTURE"
+ctFillEnabled = displayProfile != "OUTLINE CAPTURE"
+h1FillEnabled = displayProfile == "FULL MAP" or (displayProfile == "NIGHTWATCH AUTO" and chartSeconds <= 180)
+h2FillEnabled = displayProfile == "FULL MAP"
+ctZoneVisible = renderWindow and showZone and zoneActive and (showConsumed or zoneState != "CONSUMED") and not ctZoneStale
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Content-layer rendering: restrained zone fill, white geometry, candles remain
+// readable. No route, target projection or synthetic future is drawn.
+// ─────────────────────────────────────────────────────────────────────────────
+plot(showTrail ? ctTrail : na, "NQX Structural Invalidation", color = color.new(color.white, 22), linewidth = 1, style = plot.style_linebr)
+plot(showExtreme ? ctExtreme : na, "NQX Swing Extremum", color = color.new(color.white, 65), linewidth = 1, style = plot.style_circles)
+// Approach glow: within approachAtr frozen-ATR of the band, boundaries brighten and a
+// state-colored halo switches on. Hue stays zoneGeometryColor (high-pressure color is
+// reserved for label / table header / markers). Disabled in outline capture modes.
+approachHot = ctZoneVisible and ctApproach and not profileOutline and not outlineOnly
+plot(approachHot ? zoneLow : na, "NQX Zone Low Approach Halo", color = color.new(zoneGeometryColor, 78), linewidth = 4, style = plot.style_linebr)
+plot(approachHot ? zoneHigh : na, "NQX Zone High Approach Halo", color = color.new(zoneGeometryColor, 78), linewidth = 4, style = plot.style_linebr)
+p618 = plot(ctZoneVisible and showFibLines ? level618 : na, "NQX CT Fib 61.8", color = color.new(color.white, 18), linewidth = 1, style = plot.style_linebr)
+p786 = plot(ctZoneVisible and showFibLines ? level786 : na, "NQX CT Fib 78.6", color = color.new(color.white, 25), linewidth = 1, style = plot.style_linebr)
+p886 = plot(ctZoneVisible and showFibLines ? level886 : na, "NQX CT Fib 88.6", color = color.new(color.white, 18), linewidth = 1, style = plot.style_linebr)
+pZoneLow = plot(ctZoneVisible and not showFibLines ? zoneLow : na, "NQX CT Zone Low", color = color.new(color.white, 20), linewidth = 1, style = plot.style_linebr)
+pZoneHigh = plot(ctZoneVisible and not showFibLines ? zoneHigh : na, "NQX CT Zone High", color = color.new(color.white, 20), linewidth = 1, style = plot.style_linebr)
+// Freshness ladder: alpha steps one-way with zoneState (deepestTouch/visitAge are
+// monotonic within a zone's life), so the fill can never oscillate like v1.3's stripes.
+// Depth gradient: density rises from the 61.8 edge toward the 88.6 edge; hue locked.
+ctStateAlpha = switch zoneState
+    "ARMED" => math.max(70, zoneOpacity - 8)
+    "FRESH VISIT" => math.max(70, zoneOpacity - 4)
+    "WICK TESTED" => zoneOpacity
+    "BODY TESTED" => math.min(98, zoneOpacity + 3)
+    "DEEP MITIGATION" => math.min(98, zoneOpacity + 6)
+    "CONSUMED" => math.min(98, zoneOpacity + 8)
+    => 100
+ctFillEarlyColor = color.new(zoneGeometryColor, math.min(99, ctStateAlpha + 6))
+ctFillDeepColor = color.new(zoneGeometryColor, math.max(65, ctStateAlpha - 8))
+ctFillOn = ctZoneVisible and ctFillEnabled and not profileOutline and not outlineOnly
+fill(p618, p886, top_value = zoneHigh, bottom_value = zoneLow, top_color = ctFillOn ? (ctTrend == 1 ? ctFillEarlyColor : ctFillDeepColor) : na, bottom_color = ctFillOn ? (ctTrend == 1 ? ctFillDeepColor : ctFillEarlyColor) : na, title = "NQX Frozen Chart-TF Zone")
+fill(pZoneLow, pZoneHigh, top_value = zoneHigh, bottom_value = zoneLow, top_color = ctFillOn ? (ctTrend == 1 ? ctFillEarlyColor : ctFillDeepColor) : na, bottom_color = ctFillOn ? (ctTrend == 1 ? ctFillDeepColor : ctFillEarlyColor) : na, title = "NQX Frozen Chart-TF Zone Outline Mode")
+
+structureZoneVisible = renderWindow and profileShowsHtf and showStructureZone and h1Unique and h1Active and (showConsumed or h1Visits < 3) and not h1ZoneStale
+contextZoneVisible = renderWindow and profileShowsHtf and showContextZone and h2Unique and h2Active and (showConsumed or h2Visits < 3) and not h2ZoneStale
+pH1Low = plot(structureZoneVisible ? h1ZoneLow : na, "NQX Structure Zone Low", color = color.new(h1Color, 18), linewidth = 2, style = plot.style_linebr)
+pH1High = plot(structureZoneVisible ? h1ZoneHigh : na, "NQX Structure Zone High", color = color.new(h1Color, 18), linewidth = 2, style = plot.style_linebr)
+fill(pH1Low, pH1High, color = structureZoneVisible and h1FillEnabled and not profileOutline and not outlineOnly ? color.new(h1Color, math.min(100, zoneOpacity + 4)) : na, title = "NQX Structure-TF Zone")
+pH2Low = plot(contextZoneVisible ? h2ZoneLow : na, "NQX Context Zone Low", color = color.new(h2Color, 35), linewidth = 2, style = plot.style_linebr)
+pH2High = plot(contextZoneVisible ? h2ZoneHigh : na, "NQX Context Zone High", color = color.new(h2Color, 35), linewidth = 2, style = plot.style_linebr)
+fill(pH2Low, pH2High, color = contextZoneVisible and h2FillEnabled and not profileOutline and not outlineOnly ? color.new(h2Color, math.min(100, zoneOpacity + 7)) : na, title = "NQX Context-TF Zone")
+
+plotshape(renderWindow and showSignals and confirmedLong, title = "Confirmed Bull Rejection", style = shape.triangleup, location = location.belowbar, color = highBull, size = size.tiny, text = "NQX")
+plotshape(renderWindow and showSignals and confirmedShort, title = "Confirmed Bear Rejection", style = shape.triangledown, location = location.abovebar, color = highBear, size = size.tiny, text = "NQX")
+
+// Exact values are also exposed to TradingView's data window for AI/export use.
+plot(level618, "NQX_DATA_FIB_618", color = na, display = display.data_window)
+plot(level786, "NQX_DATA_FIB_786", color = na, display = display.data_window)
+plot(level886, "NQX_DATA_FIB_886", color = na, display = display.data_window)
+plot(zoneLow, "NQX_DATA_ZONE_LOW", color = na, display = display.data_window)
+plot(zoneHigh, "NQX_DATA_ZONE_HIGH", color = na, display = display.data_window)
+plot(invalidation, "NQX_DATA_INVALIDATION", color = na, display = display.data_window)
+plot(hardStop, "NQX_DATA_HARD_STOP", color = na, display = display.data_window)
+plot(longScore, "NQX_DATA_LONG_SCORE", color = na, display = display.data_window)
+plot(shortScore, "NQX_DATA_SHORT_SCORE", color = na, display = display.data_window)
+plot(visitCount, "NQX_DATA_CT_VISITS", color = na, display = display.data_window)
+plot(h1ZoneLow, "NQX_DATA_STRUCTURE_ZONE_LOW", color = na, display = display.data_window)
+plot(h1ZoneHigh, "NQX_DATA_STRUCTURE_ZONE_HIGH", color = na, display = display.data_window)
+plot(h1Trail, "NQX_DATA_STRUCTURE_TRAIL", color = na, display = display.data_window)
+plot(h1Visits, "NQX_DATA_STRUCTURE_VISITS", color = na, display = display.data_window)
+plot(h2ZoneLow, "NQX_DATA_CONTEXT_ZONE_LOW", color = na, display = display.data_window)
+plot(h2ZoneHigh, "NQX_DATA_CONTEXT_ZONE_HIGH", color = na, display = display.data_window)
+plot(h2Trail, "NQX_DATA_CONTEXT_TRAIL", color = na, display = display.data_window)
+plot(h2Visits, "NQX_DATA_CONTEXT_VISITS", color = na, display = display.data_window)
+plot(ctZoneStale ? 1 : 0, "NQX_DATA_CT_STALE", color = na, display = display.data_window)
+plot(h1ZoneStale ? 1 : 0, "NQX_DATA_STRUCTURE_STALE", color = na, display = display.data_window)
+plot(h2ZoneStale ? 1 : 0, "NQX_DATA_CONTEXT_STALE", color = na, display = display.data_window)
+plot(ctZoneDistAtr, "NQX_DATA_CT_ZONE_DIST_ATR", color = na, display = display.data_window)
+plot(ctRearmProgress, "NQX_DATA_CT_REARM_PROGRESS", color = na, display = display.data_window)
+
+f_trendText(_trend) => _trend == 1 ? "BULL" : "BEAR"
+f_price(_value) => str.tostring(_value, format.mintick)
+f_jsonNumber(_value) => na(_value) ? "null" : f_price(_value)
+f_distanceAtr(_close, _trail, _atr) => na(_atr) or _atr == 0 ? "N/A" : str.tostring((_close - _trail) / _atr, "#.00")
+f_zoneStatus(_active, _visits, _stale) => not _active ? "BUILD" : _stale ? "STALE V" + str.tostring(_visits) : _visits >= 3 ? "USED V" + str.tostring(_visits) : _visits == 0 ? "ARMED V0" : "ZONE V" + str.tostring(_visits)
+
+// Stale ghost: one dashed outline plus a tiny tag so the abandoned zone stays on the
+// trader's map without a loud fill. Redrawn only on the last bar; vanishes on rearm,
+// trend flip, or when price returns within staleZoneAtr.
+var box ctGhost = na
+var label ctGhostTag = na
+if barstate.islast
+    box.delete(ctGhost)
+    label.delete(ctGhostTag)
+    if showStaleGhost and zoneActive and ctZoneStale and not profileOutline and not outlineOnly
+        ctGhost := box.new(left = ctZoneBirthTime, top = zoneHigh, right = time, bottom = zoneLow, xloc = xloc.bar_time, border_color = color.new(color.silver, 55), border_width = 1, border_style = line.style_dashed, bgcolor = color.new(color.silver, 97))
+        ctGhostTag := label.new(time, zoneMid, "STALE V" + str.tostring(visitCount) + " · " + str.tostring(ctZoneDistAtr, "#.0") + " ATR AWAY", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 60), textcolor = color.silver, size = size.tiny)
+
+var label liveLabel = na
+if barstate.islast
+    label.delete(liveLabel)
+    if showLiveLabel and ctZoneVisible
+        liveText = "NQX ATR PRESSURE v1.5\n" + zoneClass + " | SCORE " + str.tostring(ctTrend == 1 ? longScore : shortScore) + "/100\n" + zoneState + " | CT VISITS " + str.tostring(visitCount) + "\nFROZEN CT ZONE " + f_price(zoneLow) + ".." + f_price(zoneHigh) + "\nDIST " + str.tostring(ctZoneDistAtr, "#.00") + " ATR" + (ctApproach ? " · APPROACH" : "") + "\nINV " + f_price(invalidation) + " | STOP " + f_price(hardStop) + "\nSCORE IS NOT PROBABILITY"
+        liveLabel := label.new(bar_index, zoneMid, liveText, xloc = xloc.bar_index, yloc = yloc.price, style = ctTrend == 1 ? label.style_label_up : label.style_label_down, color = color.new(pressureColor, 10), textcolor = color.white, size = size.small)
+
+var table truth = table.new(position.top_right, 5, 9, border_width = 1, border_color = color.new(color.white, 72), frame_color = color.new(color.white, 72))
+if barstate.isfirst
+    table.merge_cells(truth, 0, 0, 4, 0)
+    table.merge_cells(truth, 0, 8, 4, 8)
+if barstate.islast
+    if showTable
+        table.cell(truth, 0, 0, "NQX ATR PRESSURE v1.5", bgcolor = color.new(pressureColor, 20), text_color = color.white, text_size = size.small)
+        table.cell(truth, 0, 1, "ROLE", text_color = color.silver, bgcolor = color.new(color.black, 15))
+        table.cell(truth, 1, 1, "TF", text_color = color.silver, bgcolor = color.new(color.black, 15))
+        table.cell(truth, 2, 1, "STATE", text_color = color.silver, bgcolor = color.new(color.black, 15))
+        table.cell(truth, 3, 1, "TRAIL", text_color = color.silver, bgcolor = color.new(color.black, 15))
+        table.cell(truth, 4, 1, "DIST/ATR", text_color = color.silver, bgcolor = color.new(color.black, 15))
+        table.cell(truth, 0, 2, "TRIGGER", text_color = color.white)
+        table.cell(truth, 1, 2, timeframe.period, text_color = color.white)
+        table.cell(truth, 2, 2, f_trendText(ctTrend) + " " + f_zoneStatus(zoneActive, visitCount, ctZoneStale) + (na(ctRearmProgress) ? "" : " R" + str.tostring(math.min(ctRearmProgress, 1.0) * 100, "#") + "%"), text_color = ctTrend == 1 ? regularBull : regularBear)
+        table.cell(truth, 3, 2, f_price(ctTrail), text_color = color.white)
+        table.cell(truth, 4, 2, f_distanceAtr(close, ctTrail, ctAtr), text_color = color.white)
+        table.cell(truth, 0, 3, "STRUCTURE", text_color = color.white)
+        table.cell(truth, 1, 3, structureTf, text_color = color.white)
+        table.cell(truth, 2, 3, f_trendText(h1Trend) + " " + f_zoneStatus(h1Active, h1Visits, h1ZoneStale), text_color = h1Trend == 1 ? regularBull : regularBear)
+        table.cell(truth, 3, 3, f_price(h1Trail), text_color = color.white)
+        table.cell(truth, 4, 3, f_distanceAtr(h1Close, h1Trail, h1Atr), text_color = color.white)
+        table.cell(truth, 0, 4, "CONTEXT", text_color = color.white)
+        table.cell(truth, 1, 4, contextTf, text_color = color.white)
+        table.cell(truth, 2, 4, f_trendText(h2Trend) + " " + f_zoneStatus(h2Active, h2Visits, h2ZoneStale), text_color = h2Trend == 1 ? regularBull : regularBear)
+        table.cell(truth, 3, 4, f_price(h2Trail), text_color = color.white)
+        table.cell(truth, 4, 4, f_distanceAtr(h2Close, h2Trail, h2Atr), text_color = color.white)
+        table.cell(truth, 0, 5, "PRESSURE", text_color = color.silver)
+        table.cell(truth, 1, 5, "L " + str.tostring(longScore), text_color = highBull)
+        table.cell(truth, 2, 5, "S " + str.tostring(shortScore), text_color = highBear)
+        table.cell(truth, 3, 5, (ctZoneStale ? "STALE · " : "") + zoneState, text_color = ctZoneStale ? color.silver : color.white)
+        table.cell(truth, 4, 5, "V " + str.tostring(visitCount) + "/" + str.tostring(h1Visits) + "/" + str.tostring(h2Visits), text_color = color.white)
+        table.cell(truth, 0, 6, "RISK", text_color = color.silver)
+        table.cell(truth, 1, 6, "INV", text_color = color.silver)
+        table.cell(truth, 2, 6, f_price(invalidation), text_color = color.white)
+        table.cell(truth, 3, 6, "STOP", text_color = color.silver)
+        table.cell(truth, 4, 6, f_price(hardStop), text_color = color.white)
+        table.cell(truth, 0, 7, "SAMPLE", text_color = color.silver)
+        table.cell(truth, 1, 7, str.tostring(bar_index + 1) + " BARS", text_color = color.white)
+        table.cell(truth, 2, 7, "FLIP " + str.tostring(bullFlipCount) + "/" + str.tostring(bearFlipCount), text_color = color.white)
+        table.cell(truth, 3, 7, "REJECT", text_color = color.silver)
+        table.cell(truth, 4, 7, str.tostring(longRejectCount) + "/" + str.tostring(shortRejectCount), text_color = color.white)
+        table.cell(truth, 0, 8, "FROZEN CT / STRUCTURE / CONTEXT | CONFIRMED HTF | SCORE IS NOT PROBABILITY", text_color = color.silver, bgcolor = color.new(color.black, 15), text_size = size.tiny)
+    else
+        table.clear(truth, 0, 0, 4, 8)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts. A zone visit is a WATCH event. Only a confirmed rejection receives the
+// dynamic JSON payload; Nightwatch must still apply its own NQX risk gate.
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(barstate.isconfirmed and visitStart, "NQX zone visit", "NQX ATR Pressure: active zone visit. Review price action; this is not an entry signal.")
+alertcondition(fib618Touch, "NQX Fib 61.8 touch", "NQX ATR Pressure: price entered the 61.8 retracement boundary.")
+alertcondition(fib786Touch, "NQX Fib 78.6 touch", "NQX ATR Pressure: price entered the 78.6 retracement boundary.")
+alertcondition(fib886Touch, "NQX Fib 88.6 touch", "NQX ATR Pressure: price entered the 88.6 retracement boundary.")
+alertcondition(confirmedLong, "NQX confirmed bullish rejection", "NQX ATR Pressure: confirmed bullish rejection candidate.")
+alertcondition(confirmedShort, "NQX confirmed bearish rejection", "NQX ATR Pressure: confirmed bearish rejection candidate.")
+alertcondition(barstate.isconfirmed and trendFlip, "NQX ATR trend flip", "NQX ATR Pressure: confirmed ATR trend flip; prior zone is invalidated.")
+alertcondition(barstate.isconfirmed and ctApproach and not ctApproach[1], "NQX zone approach", "NQX ATR Pressure: price entered the approach envelope of the active zone. WATCH — not an entry signal.")
+alertcondition(barstate.isconfirmed and ctZoneStale and not ctZoneStale[1], "NQX zone stale", "NQX ATR Pressure: active zone abandoned by price; risk geometry fell back to the live trail.")
+
+f_json(_side, _score) =>
+    '{"schema":"NQX_ATR_PRESSURE/1","indicator_version":"1.5","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","event":"CONFIRMED_REJECTION","side":"' + _side + '","atr_kernel":"' + trailKernel + '","pressure_score":' + str.tostring(_score) + ',"score_is_probability":false,"zone_low":' + f_jsonNumber(zoneLow) + ',"zone_high":' + f_jsonNumber(zoneHigh) + ',"fib_618":' + f_jsonNumber(level618) + ',"fib_786":' + f_jsonNumber(level786) + ',"fib_886":' + f_jsonNumber(level886) + ',"invalidation":' + f_jsonNumber(invalidation) + ',"hard_stop":' + f_jsonNumber(hardStop) + ',"zone_state":"' + zoneState + '","zone_stale":' + (ctZoneStale ? "true" : "false") + ',"visit_count":' + str.tostring(visitCount) + ',"structure_tf":"' + structureTf + '","structure_zone_low":' + f_jsonNumber(h1ZoneLow) + ',"structure_zone_high":' + f_jsonNumber(h1ZoneHigh) + ',"structure_visits":' + str.tostring(h1Visits) + ',"context_tf":"' + contextTf + '","context_zone_low":' + f_jsonNumber(h2ZoneLow) + ',"context_zone_high":' + f_jsonNumber(h2ZoneHigh) + ',"context_visits":' + str.tostring(h2Visits) + ',"htf1_state":"' + f_trendText(h1Trend) + '","htf2_state":"' + f_trendText(h2Trend) + '","confirmed_bar":true}'
+
+if enableDynamicAlert and confirmedLong
+    alert(f_json("LONG", longScore), alert.freq_once_per_bar_close)
+if enableDynamicAlert and confirmedShort
+    alert(f_json("SHORT", shortScore), alert.freq_once_per_bar_close)

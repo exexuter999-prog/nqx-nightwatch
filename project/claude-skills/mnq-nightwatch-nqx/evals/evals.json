@@ -1,0 +1,228 @@
+{
+  "skill_name": "mnq-nightwatch-nqx",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "3枚のスクリーンショットを取得した状況を分析してほしい。MNQ1!の3M・15M・45Mチャートをほぼ同時刻に別々にキャプチャしたが、キャプチャのタイミングがずれているため表示価格が微妙に異なる: 3M表示は28,693.75(取得18:56:30)、15M表示は28,697.25(取得18:57:05)、45M表示は28,706.00(取得18:57:42)。各時間足で観測できる価格レベル・スイング構造をもとに、LONG・SHORT・FLATを比較してほしい。数値OHLCの提供はない(スクリーンショットのみ)。",
+      "expected_output": "3つの時間足価格を平均せず、各フレームの取得時刻付きスナップショットとして別々に保持する。3M/15M/45Mへ役割(LTF/CTF/HTF、または実際のフレーム構成に応じた役割)を分担する。OBSERVEDな価格レベルとINDICATOR_CLAIM(スコア・確率表示等)を明確に分離する。LONG・SHORT・FLATの3候補を同一証拠で比較し、FLATを独立候補として扱う。screenshot-onlyのためqm=Hであることを明示する。",
+      "files": [],
+      "expectations": [
+        "Cross-timeframe prices (28,693.75 / 28,697.25 / 28,706.00) are never averaged into one 'current price'",
+        "Each frame's own observation timestamp is preserved separately",
+        "3M/15M/45M (or the roles the actual frames map to) are given distinct analytical roles",
+        "OBSERVED price-level claims are textually distinguished from INDICATOR_CLAIM claims",
+        "LONG, SHORT, and FLAT are all three explicitly compared on the same evidence",
+        "FLAT is presented as a scored candidate, not a silent default",
+        "Any resulting NQX packet uses qm=H"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "MNQ1!の15Mチャート1枚のスクリーンショットだけを渡された。ローソク足のOHLC数値は読み取れないが、抵抗帯29,050付近と支持帯28,900付近のレベルは明瞭に見える。現在値は28,957付近。この証拠だけでNQXパケットを1本生成し、検証してほしい。",
+      "expected_output": "O|c=MISSINGとして観測OHLCを補完しない。screenshot-only品質モード(qm=H)の制限を全て適用し、qm=Hの下で数値化された確率・期待値・サイズを出力しない。読み取れない価格を捏造せず、レベルは~付きの近似として扱う。生成したNQXパケットがvalidate_nqx.pyの検証に合格する(exit code 0)。",
+      "files": [],
+      "expectations": [
+        "The emitted packet contains O|c=MISSING rather than a fabricated OHLC row",
+        "M.qm=H is set and no numeric pp/br/ge/ne/ce/sz field is present without being declared in M.na",
+        "Approximate level prices are marked with ~ rather than presented as exact",
+        "The final NQX packet passes scripts/validate_nqx.py with exit code 0"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "MNQ1!の15Mチャート画像1枚から、直近の確定足だけをOHLC抽出してほしい(OHLC_EXTRACTモード)。画像には直近8本の完全に確定したローソク足のOHLC数値ラベルが明瞭に見えており、最新の1本(9本目)はまだ形成途中(進行中バー)であることが読み取れる。",
+      "expected_output": "進行中の最新足を除外し、確定済みの8本だけを古い順にO|c=の1行として出力する。全NQXパケットへの置換は行わず、O|c=行だけを返す。",
+      "files": [],
+      "expectations": [
+        "The forming/incomplete 9th bar is excluded from the output",
+        "Bars are ordered chronologically, oldest first",
+        "Output is exactly one O|c= line, not a full NQX packet replacement",
+        "Each emitted bar satisfies HIGH >= max(OPEN,CLOSE), LOW <= min(OPEN,CLOSE), HIGH >= LOW"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "MNQ1!のチャート画像を渡された。ローソク足の形状(実体・ヒゲの見た目)は視認できるが、価格軸のラベルが不鮮明で潰れており、各足の正確なOHLC数値は読み取れない。OHLC_EXTRACTモードでO.cを抽出してほしい。",
+      "expected_output": "見た目のローソク形状から数値を逆算・推測せず、O|c=MISSINGを返す。",
+      "files": [],
+      "expectations": [
+        "Output is O|c=MISSING",
+        "No numeric OHLC values are fabricated or reconstructed from candle silhouette alone"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "既存のNQXパケット(evals/fixtures/repair-needed.nqx)を検証し、エラーがあれば意味を変えずに最小修復してほしい。このパケットには実装者にとって未知の独自フィールド(xf, zf)が含まれている可能性がある。",
+      "expected_output": "既知の1フィールドの形式違反(S1.vuのタイムゾーン欠落)だけを修正し、未知フィールドxf/zfはそのまま保持する。修復後のパケットがvalidate_nqx.pyに合格する。",
+      "files": ["evals/fixtures/repair-needed.nqx"],
+      "expectations": [
+        "The unknown fields xf and zf are preserved verbatim in the repaired packet",
+        "Only the S1.vu timezone violation is corrected (e.g. by appending JST)",
+        "No other field's meaning is changed by the repair",
+        "The repaired packet passes scripts/validate_nqx.py with exit code 0"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "既存のNQXパケット(evals/fixtures/test-sl-structural-distance.nqx)を検証してほしい。このパケットは観測OHLCがなく(O|c=MISSING相当)、Zレコードに構造レベルの一覧があり、SLがそれらのレベルの近くに置かれている。",
+      "expected_output": "validate_nqx.pyを実行し、SL_STRUCTURAL_DISTANCEエラーが検出されることを確認・報告する。マッピングされたレベル間隔中央値×0.42のMAPPED LEVEL SPACING経路が使われる(O.cが無いため)。不正なパケットをそのままNightwatchへ適用可能として扱わない。",
+      "files": ["evals/fixtures/test-sl-structural-distance.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports SL_STRUCTURAL_DISTANCE for this packet",
+        "The explanation correctly attributes the range unit to MAPPED LEVEL SPACING (not SUPPLIED OHLC RANGE) given O.c is absent",
+        "The invalid packet is not presented as ready to overwrite an existing valid analysis"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "MNQのポジションを検討している。VIXの値を19.5とだけ聞いたが、どこで見た値か・いつの値かは覚えていない。また、来週FOMCがあるらしいという話も聞いたが、正確な発表時刻はわからない。この2つの情報をNQX分析に組み込んでほしい。",
+      "expected_output": "出典・as-of時刻のないVIX値をUNVERIFIEDまたはSTALE相当として扱い、そのままM.vxへ数値確定で載せない(vxa/vxs/vxfが揃わない限りvx*フィールド自体を出さないか、不足を明示する)。FOMCイベントをVERIFIEDにせず、正確な時刻がない旨を明示する。VIXからgammaを推定しない。",
+      "files": [],
+      "expectations": [
+        "The VIX value is not encoded as a fully-provenanced M.vx field without source/as-of/freshness",
+        "The FOMC event is not marked VERIFIED without a primary source URL and exact time",
+        "No gamma sign (P/N) is inferred from the VIX value alone",
+        "The analysis explicitly states the event time and VIX provenance are unverified"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "観測OHLCのあるロングシナリオについて、条件付きの上昇後に一度押し戻される、というシナリオの形を可視化する条件付き予測形状(projection shape)を追加してほしい。現在値・アンカー価格は判読可能な状態とする。",
+      "expected_output": "3〜6本の連続する~付きOHLCバーをS.pcとして生成する。各バーの値幅・実体が機械的な反復にならない(非均一)。観測データとの境界に白いNOW境界がある前提を明示する。生成した形状がrisk・R:R・confidenceのいずれにも影響しないことを明示する。",
+      "files": [],
+      "expectations": [
+        "S.pc contains between 3 and 6 sequential bars (never more than 12)",
+        "Every OHLC price in the projection tape is prefixed with ~",
+        "Bar shapes are not mechanically identical across steps (varied range/body to represent pullback character)",
+        "The output explicitly states the projection does not feed into risk, R:R, or confidence",
+        "A white NOW boundary between observed and projected data is described or assumed"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "チャート画像を渡されたが、現在値もアンカーになりそうな価格もどちらも軸ラベルが不鮮明で読み取れない。この状態で条件付き予測形状を出してほしいと頼まれている。",
+      "expected_output": "S.pcを省略し、判読不能な現在値から予測形状を捏造しない。証拠が不十分であることを明示し、必要であればNO TRADEとする。",
+      "files": [],
+      "expectations": [
+        "S.pc is omitted rather than populated with a guessed anchor price",
+        "No synthetic future candle is generated from an unreadable current price",
+        "The response explicitly states the anchor price is unreadable",
+        "NO TRADE or an equivalent explicit insufficient-evidence statement is used when appropriate"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "1時間足チャート画像1枚を渡された。個々のバーに価格ラベルは付いておらず、価格軸のグリッド線(20pt刻み)とローソク足の見た目だけで各バーのOHLCを読み取る必要がある。OHLC_EXTRACTモードで直近の確定バーを抽出してほしい。",
+      "expected_output": "グリッド線基準で読み取った各バーの価格に、個別に~を付けて出力する(exact読みではなくaxis/grid-line estimateであることを明示)。~付きバーもOBSERVEDな1本として扱い、HIGH>=max(OPEN,CLOSE)等の幾何チェックを満たす。ローソク実体の見た目だけでグリッド対応が取れない部分はUNREADABLEとして扱い、無理に数値化しない。",
+      "files": ["evals/fixtures/test-ohlc-approx.nqx"],
+      "expectations": [
+        "Each grid-line-estimated price in the emitted O.c bars carries a ~ prefix",
+        "~-marked bars are still treated as OBSERVED, not UNREADABLE or MISSING",
+        "Every emitted bar satisfies HIGH >= max(OPEN,CLOSE), LOW <= min(OPEN,CLOSE), HIGH >= LOW",
+        "A price with no discernible grid/axis correspondence (pure candle-silhouette guessing) is not smuggled in as a ~ estimate",
+        "scripts/validate_nqx.py accepts the ~-marked O.c bars without a NON-NUMERIC OHLC or INVALID OHLC GEOMETRY error"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "evals/fixtures/test-wide-geometry-valid.nqx をWG-H1として検証してほしい。固定ポイントのSL/TPへ置換せず、観測レンジ・構造・R倍数・マップ済みroadblockを監査すること。",
+      "expected_output": "POLICY=WG-H1を検出し、15本のO.cから末尾14本のTrue Range単純平均U=4.00を計算する。ロングのSL=19988が支持19990の外側へ0.50U、総risk=13ptが1.50U以上、TPが1.80R/2.80R/4.00R以上かつZにマップ済みであることを確認し、validatorがexit code 0になる。",
+      "files": ["evals/fixtures/test-wide-geometry-valid.nqx"],
+      "expectations": [
+        "The trailing 14 True Range simple mean is calculated as U=4.00 from 15 accepted O.c bars",
+        "The stop clears named support by max(0.50U,2pt) and total entry-midpoint risk is at least 1.50U",
+        "TP1/TP2/TP3 clear 1.80R/2.80R/4.00R and each matches a declared Z roadblock",
+        "scripts/validate_nqx.py exits 0 with no errors"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "evals/fixtures/test-wide-geometry-ineligible.nqx をWG-H1として検証してほしい。幾何が成立していてもM.rg=BAである点を見落とさないこと。",
+      "expected_output": "WG_REGIME_INELIGIBLEを検出し、BALANCEでは広いSL/TPを自動承認しない。パケットをNightwatchへ適用可能として扱わず、FLATまたは別versionの非wide policyを要求する。",
+      "files": ["evals/fixtures/test-wide-geometry-ineligible.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_REGIME_INELIGIBLE",
+        "The packet is rejected even though its stop and target arithmetic otherwise pass",
+        "The response recommends FLAT or a separately versioned non-wide policy rather than silently widening risk"
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "evals/fixtures/test-wide-geometry-valid-short.nqx を検証し、WG-H1のSHORT側がLONG側と対称に動くことを確認してほしい。",
+      "expected_output": "抵抗20012の外側へSL=20014、entry midpointから13ptのrisk、下方向のexact mapped TP群が1.85R/2.85R/4.00Rであることを確認し、validatorがexit code 0になる。",
+      "files": ["evals/fixtures/test-wide-geometry-valid-short.nqx"],
+      "expectations": [
+        "The short stop uses the resistance outer edge plus max(0.50U,2pt)",
+        "SHORT invalidation ordering entryHigh < invalidation < SL passes",
+        "TP1/TP2/TP3 are strictly descending exact mapped roadblocks and clear the frozen R floors",
+        "scripts/validate_nqx.py exits 0 with no errors"
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "evals/fixtures/test-wide-geometry-target-skip.nqx を検証してほしい。TP1自体はZに存在しR floorも満たすが、その直前に別の適格roadblockがある。",
+      "expected_output": "20024.5が最初の1.80R以上のexact roadblockなのにTP1=20025がそれを飛ばすため、WG_TARGET_NOT_SUCCESSIVEで拒否する。",
+      "files": ["evals/fixtures/test-wide-geometry-target-skip.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_TARGET_NOT_SUCCESSIVE",
+        "The validator identifies 20024.5 as the required first eligible roadblock",
+        "The packet remains rejected even though TP1=20025 is itself mapped and above 1.80R"
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "evals/fixtures/test-wide-geometry-bad-time.nqx をWG-H1として検証し、M.tf=15MなのにO.cが1分刻みである点を監査してほしい。",
+      "expected_output": "本数やOHLC値が揃っていても、O.cの時刻間隔がM.tfと一致しないためWG_RANGE_UNIT_MISSINGで拒否する。",
+      "files": ["evals/fixtures/test-wide-geometry-bad-time.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_RANGE_UNIT_MISSING",
+        "The validator states that O.c cadence must exactly match M.tf=15M",
+        "The packet is rejected rather than calculating U from off-cadence duplicate-able bars"
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "evals/fixtures/test-wide-geometry-estimated-prices.nqx をWG-H1として検証し、推定・装飾されたentry/SL/TP/invalidationとZ levelが実行価格へ変換されないことを確認してほしい。",
+      "expected_output": "WG_EXECUTABLE_TOKEN_INVALIDとWG_LEVEL_TOKEN_INVALIDを報告し、~・≈・ラベル付き価格から数字だけを抜き出してwide geometryを認可しない。",
+      "files": ["evals/fixtures/test-wide-geometry-estimated-prices.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_EXECUTABLE_TOKEN_INVALID",
+        "scripts/validate_nqx.py reports WG_LEVEL_TOKEN_INVALID",
+        "The packet is rejected even though stripping decorations would make its arithmetic appear valid"
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "evals/fixtures/test-wide-geometry-empty-token.nqx をWG-H1として検証し、TP末尾カンマとZ levelの連続カンマを空tokenとして拒否してほしい。",
+      "expected_output": "WG_EXECUTABLE_TOKEN_INVALIDとWG_LEVEL_TOKEN_INVALIDを報告し、空要素を捨ててcanonical listとして通さない。",
+      "files": ["evals/fixtures/test-wide-geometry-empty-token.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_EXECUTABLE_TOKEN_INVALID",
+        "scripts/validate_nqx.py reports WG_LEVEL_TOKEN_INVALID",
+        "Empty list elements are blocking syntax errors rather than silently filtered"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "evals/fixtures/test-wide-geometry-event-blackout.nqx をWG-H1として検証してほしい。M.atの20分後にmaterial eventがある。",
+      "expected_output": "一次カレンダーのE.rtがM.at±30分に入るためWG_EVENT_BLACKOUTで拒否する。イベント前のFLAT deadlineが書かれていても新規scenario自体を認可しない。",
+      "files": ["evals/fixtures/test-wide-geometry-event-blackout.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_EVENT_BLACKOUT",
+        "A timed pre-event flatten rule does not override the frozen ±30-minute new-scenario blackout",
+        "The packet is rejected rather than widened through the event"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "evals/fixtures/test-wide-geometry-scale-mismatch.nqx をWG-H1として検証してほしい。M.pxだけ桁が1つ違う。",
+      "expected_output": "最新O.c closeとM.pxの0.5x..1.5x scale guardが不一致なのでWG_PRICE_SCALE_MISMATCHで拒否する。decimal/contract scaleの誤りを価格として補正しない。",
+      "files": ["evals/fixtures/test-wide-geometry-scale-mismatch.nqx"],
+      "expectations": [
+        "scripts/validate_nqx.py reports WG_PRICE_SCALE_MISMATCH",
+        "The validator identifies M.px as a scale mismatch against the latest exact O.c close",
+        "The packet is rejected without guessing the intended decimal placement"
+      ]
+    }
+  ]
+}

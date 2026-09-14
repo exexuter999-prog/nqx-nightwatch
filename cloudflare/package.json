@@ -1,0 +1,17 @@
+{
+  "name": "nqx-nightwatch-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "NQX Nightwatch state gateway: Worker + SQLite-backed Durable Object + hibernatable WebSocket",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:integration": "node --test test/integration.test.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

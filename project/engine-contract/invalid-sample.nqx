@@ -1,0 +1,9 @@
+!NQX/1
+D|UH=~29620..29650|LOOP=$LOOP2|LOOP2=$LOOP
+M|sy=MNQ1!|tf=3M/15M/45M|at=2026-07-14 17:10 JST|ss=CME|sf=3M,15M,45M|dq=M|px=29574.75|qm=H|pp=68%|ne=0.42R|mr=スクリーンショットのみ
+C|ac=$UNDEFINED の帯で反応|pm=買い方が捕まっている
+Z|dz=~29540..29620|r=$UH|s=~29470..29500
+E|ev=21:30 CPI|rule=持ち越し可
+G|n=3|ip=待機|mx=NOT REQUIRED|io=PASS|nr=受容か拒否|rn=保証しない
+S1|n=ロング|d=L|st=W|su=BC|ha=C|lt=SBR|zq=M|fr=WT|cf=78|sp=70|tr=^ACC(~29620,15M)|co=^RT(~29620..29645,3M)|en=29600..29650|sl=29700|tp=29750,29800,29850|rr=1.53,2.20,2.87|iv=15M実体が29580を下回ったら無効化|od=TP1先着でSUCCESS|vu=21:00|eh=様子を見る|fm=往復する|sd=反対トリガーで見送り|ef=スイープ後の実体回帰|ea=45Mは下降|cc=流動性=OBSERVED → スイープ=OBSERVED → 受容=ASSUMED → 執行|do=PRIMARY|no=特になし
+S1|n=ショート|d=S|st=W|su=RR|ha=A|lt=VAL|zq=M|fr=BT|tr=^REJ(~29500,15M)|co=^RT(~29470..29500,3M)|en=29610..29660|sl=29556|tp=29300,29240,29150|rr=9.99,2.90,4.01|iv=15M実体が29532を上回ったら無効化|vu=2026-07-14 21:00 JST|eh=^FLAT(21:15)|fm=安値で失敗オークション|sd=反対トリガーで見送り|ef=45MはLL/LH|ea=下方向の主導権は未確認|cc=流動性=OBSERVED → 失敗=INFERRED|no=特になし

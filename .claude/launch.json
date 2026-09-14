@@ -1,0 +1,47 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mini-app",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5173",
+        "--strictPort"
+      ],
+      "cwd": "C:/Users/exexu/Downloads/nq-nightwatch-claude-code-handoff/telegram_mini_app",
+      "port": 5173
+    },
+    {
+      "name": "svg-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "C:/Users/exexu/AppData/Local/Temp/claude/C--Users-exexu-Downloads-nq-nightwatch-claude-code-handoff/d6d8b04d-b724-4fd5-a7bf-4d4c4127fb91/scratchpad"
+      ],
+      "port": 8765
+    },
+    {
+      "name": "scratch-static",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "C:\\Users\\exexu\\AppData\\Local\\Temp\\claude\\C--Users-exexu-Downloads-nq-nightwatch-claude-code-handoff\\97267f05-4150-48ca-bca9-892ec04638e4\\scratchpad"
+      ],
+      "port": 8765
+    }
+  ]
+}

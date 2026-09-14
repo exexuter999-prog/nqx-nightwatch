@@ -1,0 +1,22 @@
+{
+  "name": "nqx-nightwatch-mini-app",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/gen-headers.mjs && vite build",
+    "verify:build": "node scripts/assert-build-budget.mjs",
+    "ci": "npm test && npm run build && npm run verify:build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "gsap": "^3.13.0",
+    "postprocessing": "^6.37.8",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.2"
+  }
+}

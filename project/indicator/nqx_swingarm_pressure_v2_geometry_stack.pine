@@ -1,0 +1,994 @@
+//@version=6
+indicator("NQX SwingArm Pressure V2 — Full Build 1.0.1", overlay = true, max_bars_back = 5000, max_boxes_count = 10, max_labels_count = 150, max_lines_count = 20)
+
+// Full-build implementation. Existing v1.5 remains a separate untouched file.
+// Three independent SwingArm engines: confirmed 3m LTF, chart-timeframe CT,
+// and confirmed 45m HTF. Score is evidence, never a probability. The LTF
+// request uses real intrabars; no synthetic path or future price is created.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+string GROUP_PRESET = "01 · PRESET & ENGINES"
+string GROUP_FIB    = "02 · FIB GEOMETRY"
+string GROUP_SCORE  = "03 · PRESSURE SCORE"
+string GROUP_VIEW   = "04 · DISPLAY"
+string GROUP_INFO   = "05 · INFORMATION"
+string GROUP_EVENTS = "06 · CONFIRMED EVENTS"
+string GROUP_HISTORY = "07 · FROZEN HISTORY"
+string GROUP_RISK = "08 · TARGET & RISK"
+string GROUP_RSI = "09 · RSI CANDLES"
+string GROUP_EXPORT = "10 · ALERTS & EXPORT"
+
+string tradingType = input.string("3m/15m/45m", "Trading type", options = ["3m/15m/45m", "MANUAL"], group = GROUP_PRESET)
+string manualLtf = input.timeframe("3", "Manual LTF", group = GROUP_PRESET)
+string manualHtf = input.timeframe("45", "Manual HTF", group = GROUP_PRESET)
+string trailType = input.string("modified", "Trail kernel", options = ["modified", "unmodified"], group = GROUP_PRESET)
+
+int ctLength = input.int(28, "CT ATR length", minval = 2, maxval = 200, group = GROUP_PRESET)
+float ctFactor = input.float(5.0, "CT ATR factor", minval = 0.1, maxval = 20.0, step = 0.1, group = GROUP_PRESET)
+int h1Length = input.int(28, "LTF ATR length", minval = 2, maxval = 200, group = GROUP_PRESET)
+float h1Factor = input.float(5.0, "LTF ATR factor", minval = 0.1, maxval = 20.0, step = 0.1, group = GROUP_PRESET)
+int h2Length = input.int(28, "HTF ATR length", minval = 2, maxval = 200, group = GROUP_PRESET)
+float h2Factor = input.float(6.0, "HTF ATR factor", minval = 0.1, maxval = 20.0, step = 0.1, group = GROUP_PRESET)
+
+float fib1Pct = input.float(61.8, "Fib 1 (%)", minval = 0.0, maxval = 100.0, step = 0.1, group = GROUP_FIB)
+float fib2Pct = input.float(78.6, "Fib 2 (%)", minval = 0.0, maxval = 100.0, step = 0.1, group = GROUP_FIB)
+float fib3Pct = input.float(88.6, "Fib 3 (%)", minval = 0.0, maxval = 100.0, step = 0.1, group = GROUP_FIB)
+int warmupBars = input.int(0, "Warm-up bars (0 = public-reference compatible)", minval = 0, maxval = 1000, group = GROUP_FIB)
+
+int freshAge = input.int(50, "Fresh arm age", minval = 1, maxval = 500, group = GROUP_SCORE)
+float proximityFactor = input.float(2.0, "Zone proximity (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GROUP_SCORE)
+int pressureGate = input.int(70, "High-pressure gate", minval = 40, maxval = 100, group = GROUP_SCORE)
+int hysteresisBars = input.int(2, "Confirm / release bars", minval = 1, maxval = 10, group = GROUP_SCORE)
+
+bool showH1 = input.bool(true, "SwingArm Pressure #1 · LTF", group = GROUP_VIEW)
+bool showCt = input.bool(true, "SwingArm Pressure #2 · CT", group = GROUP_VIEW)
+bool showH2 = input.bool(true, "SwingArm Pressure #3 · HTF", group = GROUP_VIEW)
+bool showOptimalEntry = input.bool(true, "Show latest Optimal Entry boxes", group = GROUP_VIEW)
+bool showExtremes = input.bool(false, "Show extremum diagnostics", group = GROUP_VIEW)
+bool reducedEffects = input.bool(false, "Reduced visual effects (fills off)", group = GROUP_VIEW)
+string displayDensity = input.string("REDUCED", "Rail density", options = ["FULL", "REDUCED", "CAPTURE"], group = GROUP_INFO)
+bool showStatusTable = input.bool(true, "Show score status table", group = GROUP_INFO)
+bool showRailLabels = input.bool(false, "Show latest-value rail labels", group = GROUP_INFO)
+int railOffset = input.int(3, "Rail offset (bars)", minval = 1, maxval = 12, group = GROUP_INFO)
+bool showTouchLabels = input.bool(false, "Show confirmed Fib touch labels", group = GROUP_EVENTS)
+bool showRejectionMarkers = input.bool(true, "Show confirmed rejection markers", group = GROUP_EVENTS)
+int touchMinScore = input.int(55, "Touch label minimum score", minval = 0, maxval = 100, group = GROUP_EVENTS)
+int labelSpacing = input.int(1, "Same-level spacing (×5 bars)", minval = 0, maxval = 20, group = GROUP_EVENTS)
+int maxTouchLabels = input.int(120, "Maximum touch labels", minval = 10, maxval = 130, group = GROUP_EVENTS)
+int maxFrozenZones = input.int(20, "Max frozen zones per engine", minval = 1, maxval = 50, group = GROUP_HISTORY)
+bool showExternalTarget = input.bool(true, "Show nearest confirmed HTF target", group = GROUP_RISK)
+bool useFrozenTargets = input.bool(true, "Include unconsumed frozen HTF zones", group = GROUP_RISK)
+bool showRiskGeometry = input.bool(true, "Show validated hard-stop geometry", group = GROUP_RISK)
+float stopBufferAtr = input.float(0.20, "Hard-stop buffer (ATR)", minval = 0.05, maxval = 2.0, step = 0.05, group = GROUP_RISK)
+int geometryBars = input.int(10, "Target / risk extent (bars)", minval = 3, maxval = 30, group = GROUP_RISK)
+float minimumScenarioRr = input.float(1.50, "Minimum scenario R:R", minval = 0.25, maxval = 10.0, step = 0.25, group = GROUP_RISK)
+bool enableRsiCandles = input.bool(false, "Enable RSI candle color", group = GROUP_RSI)
+int rsiLength = input.int(14, "RSI length", minval = 2, maxval = 100, group = GROUP_RSI)
+float rsiOverbought = input.float(70.0, "Overbought", minval = 50.0, maxval = 100.0, step = 0.5, group = GROUP_RSI)
+float rsiOversold = input.float(30.0, "Oversold", minval = 0.0, maxval = 50.0, step = 0.5, group = GROUP_RSI)
+color rsiOverboughtColor = input.color(color.rgb(33, 150, 243), "Overbought candle", group = GROUP_RSI)
+color rsiOversoldColor = input.color(color.rgb(239, 83, 80), "Oversold candle", group = GROUP_RSI)
+bool enableEventAlerts = input.bool(false, "Enable confirmed event alerts", group = GROUP_EXPORT)
+bool emitNqxJson = input.bool(false, "Emit NQX/1 JSON on valid rejection", group = GROUP_EXPORT, tooltip = "Only validator-compatible CONFIRMED_REJECTION events are exported. Invalid or incomplete geometry is never emitted.")
+bool sessionFilteredAlerts = input.bool(false, "Filter alerts by session", group = GROUP_EXPORT)
+string alertSession = input.session("0530-0230", "Alert session", group = GROUP_EXPORT)
+
+string ltf = tradingType == "3m/15m/45m" ? "3" : manualLtf
+string htf = tradingType == "3m/15m/45m" ? "45" : manualHtf
+bool modifiedKernel = trailType == "modified"
+
+float chartSeconds = timeframe.in_seconds()
+float h1Seconds = timeframe.in_seconds(ltf)
+float h2Seconds = timeframe.in_seconds(htf)
+if tradingType == "3m/15m/45m" and not na(chartSeconds) and chartSeconds != 15.0 * 60.0
+    runtime.error("3m/15m/45m preset requires a 15-minute chart")
+if not na(chartSeconds) and not na(h1Seconds) and not na(h2Seconds) and (h1Seconds > chartSeconds or chartSeconds > h2Seconds)
+    runtime.error("Invalid timeframe order: LTF must be <= chart TF <= HTF")
+
+bool h1DuplicateOfCt = h1Seconds == chartSeconds
+bool h2DuplicateOfCt = h2Seconds == chartSeconds
+bool h2DuplicateOfH1 = h2Seconds == h1Seconds
+
+// FrozenZone is chart-context state only. Price fields are written once at
+// creation and are never mutated. Lifecycle fields are reserved for 0.8.
+type FrozenZone
+    int id
+    string role
+    int dir
+    float f1
+    float f2
+    float f3
+    float trailAtFreeze
+    float extremumAtFreeze
+    float atrAtFreeze
+    int birthTime
+    int freezeTime
+    int visitCount
+    int deepestLevel
+    string state
+    int scoreAtFreeze
+    bool intersecting
+    bool rejectionEmitted
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Blackflag FTS-compatible scalar engine.
+// The confirmed chart bar is the only commit boundary. The function returns
+// scalar series only so it remains safe inside request.security().
+// ─────────────────────────────────────────────────────────────────────────────
+f_engineSeries(int _length, float _factor, bool _modified, float _fib1, float _fib2, float _fib3, int _warmup) =>
+    float barRange = high - low
+    float hiLo = math.min(barRange, 1.5 * nz(ta.sma(barRange, _length)))
+    float hRef = low <= high[1] ? high - close[1] : (high - close[1]) - 0.5 * (low - high[1])
+    float lRef = high >= low[1] ? close[1] - low : (close[1] - low) - 0.5 * (low[1] - high)
+    float trueRange = _modified ? math.max(hiLo, math.max(hRef, lRef)) : math.max(barRange, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+
+    float wildAtr = 0.0
+    wildAtr := barstate.isconfirmed ? nz(wildAtr[1]) + (trueRange - nz(wildAtr[1])) / _length : nz(wildAtr[1])
+
+    float loss = _factor * wildAtr
+    float upCandidate = close - loss
+    float downCandidate = close + loss
+
+    float trendUp = upCandidate
+    trendUp := barstate.isconfirmed ? (close[1] > trendUp[1] ? math.max(upCandidate, trendUp[1]) : upCandidate) : nz(trendUp[1], upCandidate)
+
+    float trendDown = downCandidate
+    trendDown := barstate.isconfirmed ? (close[1] < trendDown[1] ? math.min(downCandidate, trendDown[1]) : downCandidate) : nz(trendDown[1], downCandidate)
+
+    int trend = 1
+    trend := barstate.isconfirmed ? (close > trendDown[1] ? 1 : close < trendUp[1] ? -1 : nz(trend[1], 1)) : nz(trend[1], 1)
+    float trail = trend == 1 ? trendUp : trendDown
+
+    bool flippedUp = ta.crossover(trend, 0)
+    bool flippedDown = ta.crossunder(trend, 0)
+    bool flip = barstate.isconfirmed and (flippedUp or flippedDown)
+
+    float extreme = 0.0
+    extreme := barstate.isconfirmed ? (flippedUp ? high : flippedDown ? low : trend == 1 ? math.max(extreme[1], high) : trend == -1 ? math.min(extreme[1], low) : extreme[1]) : nz(extreme[1])
+
+    int armId = 0
+    armId := flip ? nz(armId[1]) + 1 : nz(armId[1])
+    int armAge = 0
+    armAge := flip ? 0 : barstate.isconfirmed ? nz(armAge[1]) + 1 : nz(armAge[1])
+    int armBirthTime = time
+    armBirthTime := barstate.isconfirmed ? (flip ? time : nz(armBirthTime[1], time)) : nz(armBirthTime[1], time)
+
+    float f1 = extreme + (trail - extreme) * _fib1 / 100.0
+    float f2 = extreme + (trail - extreme) * _fib2 / 100.0
+    float f3 = extreme + (trail - extreme) * _fib3 / 100.0
+    int frozenDir = flip ? trend[1] : na
+    float frozenTrail = flip ? trail[1] : na
+    float frozenExtreme = flip ? extreme[1] : na
+    float frozenF1 = flip ? f1[1] : na
+    float frozenF2 = flip ? f2[1] : na
+    float frozenF3 = flip ? f3[1] : na
+    float frozenAtr = flip ? wildAtr[1] : na
+    int frozenTime = flip ? time : na
+    int frozenBirthTime = flip ? armBirthTime[1] : na
+    // History-dependent ta.cross* calls must execute on every calculation.
+    // Compute them before confirmed/trend gates so Pine v6 does not skip their
+    // internal history through short-circuit evaluation.
+    bool crossUnderF1 = ta.crossunder(close, f1[1])
+    bool crossOverF1 = ta.crossover(close, f1[1])
+    bool crossUnderF2 = ta.crossunder(close, f2[1])
+    bool crossOverF2 = ta.crossover(close, f2[1])
+    bool crossUnderF3 = ta.crossunder(close, f3[1])
+    bool crossOverF3 = ta.crossover(close, f3[1])
+    bool touch1 = barstate.isconfirmed and ((trend[1] == 1 and crossUnderF1) or (trend[1] == -1 and crossOverF1))
+    bool touch2 = barstate.isconfirmed and ((trend[1] == 1 and crossUnderF2) or (trend[1] == -1 and crossOverF2))
+    bool touch3 = barstate.isconfirmed and ((trend[1] == 1 and crossUnderF3) or (trend[1] == -1 and crossOverF3))
+
+    float ema8 = ta.ema(close, 8)
+    float ema21 = ta.ema(close, 21)
+    float ema55 = ta.ema(close, 55)
+    float ema100 = ta.ema(close, 100)
+    float ema200 = ta.ema(close, 200)
+    int structureLong = (close > ema8 ? 3 : 0) + (ema8 > ema21 ? 3 : 0) + (ema21 > ema55 ? 3 : 0) + (ema55 > ema100 ? 3 : 0) + (ema100 > ema200 ? 3 : 0)
+    int structureShort = (close < ema8 ? 3 : 0) + (ema8 < ema21 ? 3 : 0) + (ema21 < ema55 ? 3 : 0) + (ema55 < ema100 ? 3 : 0) + (ema100 < ema200 ? 3 : 0)
+    float volumeMean = ta.sma(volume, 20)
+    float relVolume = na(volume) or na(volumeMean) or volumeMean <= 0 ? 0.0 : volume / volumeMean
+    int candleDirection = close > open ? 1 : close < open ? -1 : 0
+    float rsiValue = ta.rsi(close, 14)
+    bool ready = bar_index >= _warmup and not na(trail) and not na(extreme) and not na(f1) and not na(f2) and not na(f3)
+
+    [ready ? trend : na, ready ? trail : na, ready ? extreme : na, ready ? f1 : na, ready ? f2 : na, ready ? f3 : na, ready ? wildAtr : na, ready and flip, armId, armAge, ready, ready ? close : na, ready ? open : na, ready ? high : na, ready ? low : na, candleDirection, structureLong, structureShort, relVolume, rsiValue, ready and touch1, ready and touch2, ready and touch3, frozenDir, frozenTrail, frozenExtreme, frozenF1, frozenF2, frozenF3, frozenAtr, frozenTime, frozenBirthTime]
+
+// Every HTF tuple field is shifted inside its own context. lookahead_on then
+// projects only the previously confirmed HTF bar across the current chart bars.
+f_confirmedEngine(int _length, float _factor, bool _modified, float _fib1, float _fib2, float _fib3, int _warmup) =>
+    [_trend, _trail, _extreme, _f1, _f2, _f3, _atr, _flip, _armId, _armAge, _ready, _engineClose, _engineOpen, _engineHigh, _engineLow, _candleDirection, _structureLong, _structureShort, _relVolume, _rsiValue, _touch1, _touch2, _touch3, _frozenDir, _frozenTrail, _frozenExtreme, _frozenF1, _frozenF2, _frozenF3, _frozenAtr, _frozenTime, _frozenBirthTime] = f_engineSeries(_length, _factor, _modified, _fib1, _fib2, _fib3, _warmup)
+    [_trend[1], _trail[1], _extreme[1], _f1[1], _f2[1], _f3[1], _atr[1], _flip[1], _armId[1], _armAge[1], _ready[1], _engineClose[1], _engineOpen[1], _engineHigh[1], _engineLow[1], _candleDirection[1], _structureLong[1], _structureShort[1], _relVolume[1], _rsiValue[1], _touch1[1], _touch2[1], _touch3[1], _frozenDir[1], _frozenTrail[1], _frozenExtreme[1], _frozenF1[1], _frozenF2[1], _frozenF3[1], _frozenAtr[1], _frozenTime[1], _frozenBirthTime[1], time[1]]
+
+// LTF values are requested as ordered intrabar arrays. Geometry and state use
+// the latest available real intrabar; touch/flip events aggregate the complete
+// chart-bar array so events earlier in the 15m bar are not discarded.
+f_lowerEngine(int _length, float _factor, bool _modified, float _fib1, float _fib2, float _fib3, int _warmup) =>
+    [_trend, _trail, _extreme, _f1, _f2, _f3, _atr, _flip, _armId, _armAge, _ready, _engineClose, _engineOpen, _engineHigh, _engineLow, _candleDirection, _structureLong, _structureShort, _relVolume, _rsiValue, _touch1, _touch2, _touch3, _frozenDir, _frozenTrail, _frozenExtreme, _frozenF1, _frozenF2, _frozenF3, _frozenAtr, _frozenTime, _frozenBirthTime] = f_engineSeries(_length, _factor, _modified, _fib1, _fib2, _fib3, _warmup)
+    [_trend, _trail, _extreme, _f1, _f2, _f3, _atr, _flip, _armId, _armAge, _ready, _engineClose, _engineOpen, _engineHigh, _engineLow, _candleDirection, _structureLong, _structureShort, _relVolume, _rsiValue, _touch1, _touch2, _touch3, _frozenDir, _frozenTrail, _frozenExtreme, _frozenF1, _frozenF2, _frozenF3, _frozenAtr, _frozenTime, _frozenBirthTime, time, time_close]
+
+f_lastClosedIndex(array<int> _closeTimes) =>
+    int result = na
+    int count = array.size(_closeTimes)
+    if count > 0
+        for i = 0 to count - 1
+            if array.get(_closeTimes, i) <= timenow
+                result := i
+    result
+
+f_atFloat(array<float> _values, int _index, float _fallback) =>
+    not na(_index) and _index >= 0 and _index < array.size(_values) ? array.get(_values, _index) : _fallback
+
+f_atInt(array<int> _values, int _index, int _fallback) =>
+    not na(_index) and _index >= 0 and _index < array.size(_values) ? array.get(_values, _index) : _fallback
+
+f_atBool(array<bool> _values, int _index, bool _fallback) =>
+    not na(_index) and _index >= 0 and _index < array.size(_values) ? array.get(_values, _index) : _fallback
+
+f_anyTrueThrough(array<bool> _values, int _lastIndex) =>
+    bool result = false
+    if not na(_lastIndex) and _lastIndex >= 0 and array.size(_values) > 0
+        for i = 0 to math.min(_lastIndex, array.size(_values) - 1)
+            result := result or array.get(_values, i)
+    result
+
+[ctTrend, ctTrail, ctExtreme, ctF1, ctF2, ctF3, ctAtr, ctFlip, ctArmId, ctArmAge, ctReady, ctEngineClose, ctEngineOpen, ctEngineHigh, ctEngineLow, ctCandleDirection, ctStructureLong, ctStructureShort, ctRelVolume, ctRsi, ctTouch1, ctTouch2, ctTouch3, ctFrozenDir, ctFrozenTrail, ctFrozenExtreme, ctFrozenF1, ctFrozenF2, ctFrozenF3, ctFrozenAtr, ctFrozenTime, ctFrozenBirthTime] = f_engineSeries(ctLength, ctFactor, modifiedKernel, fib1Pct, fib2Pct, fib3Pct, warmupBars)
+
+[h1TrendValues, h1TrailValues, h1ExtremeValues, h1F1Values, h1F2Values, h1F3Values, h1AtrValues, h1FlipValues, h1ArmIdValues, h1ArmAgeValues, h1ReadyValues, h1EngineCloseValues, h1EngineOpenValues, h1EngineHighValues, h1EngineLowValues, h1CandleDirectionValues, h1StructureLongValues, h1StructureShortValues, h1RelVolumeValues, h1RsiValues, h1Touch1Values, h1Touch2Values, h1Touch3Values, h1FrozenDirValues, h1FrozenTrailValues, h1FrozenExtremeValues, h1FrozenF1Values, h1FrozenF2Values, h1FrozenF3Values, h1FrozenAtrValues, h1FrozenTimeValues, h1FrozenBirthTimeValues, h1SourceTimeValues, h1SourceCloseTimeValues] = request.security_lower_tf(syminfo.tickerid, ltf, f_lowerEngine(h1Length, h1Factor, modifiedKernel, fib1Pct, fib2Pct, fib3Pct, warmupBars))
+int h1LastClosedIndex = f_lastClosedIndex(h1SourceCloseTimeValues)
+
+var int h1Trend = na
+var float h1Trail = na
+var float h1Extreme = na
+var float h1F1 = na
+var float h1F2 = na
+var float h1F3 = na
+var float h1Atr = na
+var int h1ArmId = na
+var int h1ArmAge = na
+var bool h1Ready = false
+var float h1EngineClose = na
+var float h1EngineOpen = na
+var float h1EngineHigh = na
+var float h1EngineLow = na
+var int h1CandleDirection = na
+var int h1StructureLong = na
+var int h1StructureShort = na
+var float h1RelVolume = na
+var float h1Rsi = na
+var int h1SourceTime = na
+
+h1Trend := f_atInt(h1TrendValues, h1LastClosedIndex, h1Trend[1])
+h1Trail := f_atFloat(h1TrailValues, h1LastClosedIndex, h1Trail[1])
+h1Extreme := f_atFloat(h1ExtremeValues, h1LastClosedIndex, h1Extreme[1])
+h1F1 := f_atFloat(h1F1Values, h1LastClosedIndex, h1F1[1])
+h1F2 := f_atFloat(h1F2Values, h1LastClosedIndex, h1F2[1])
+h1F3 := f_atFloat(h1F3Values, h1LastClosedIndex, h1F3[1])
+h1Atr := f_atFloat(h1AtrValues, h1LastClosedIndex, h1Atr[1])
+h1ArmId := f_atInt(h1ArmIdValues, h1LastClosedIndex, h1ArmId[1])
+h1ArmAge := f_atInt(h1ArmAgeValues, h1LastClosedIndex, h1ArmAge[1])
+h1Ready := f_atBool(h1ReadyValues, h1LastClosedIndex, h1Ready[1])
+h1EngineClose := f_atFloat(h1EngineCloseValues, h1LastClosedIndex, h1EngineClose[1])
+h1EngineOpen := f_atFloat(h1EngineOpenValues, h1LastClosedIndex, h1EngineOpen[1])
+h1EngineHigh := f_atFloat(h1EngineHighValues, h1LastClosedIndex, h1EngineHigh[1])
+h1EngineLow := f_atFloat(h1EngineLowValues, h1LastClosedIndex, h1EngineLow[1])
+h1CandleDirection := f_atInt(h1CandleDirectionValues, h1LastClosedIndex, h1CandleDirection[1])
+h1StructureLong := f_atInt(h1StructureLongValues, h1LastClosedIndex, h1StructureLong[1])
+h1StructureShort := f_atInt(h1StructureShortValues, h1LastClosedIndex, h1StructureShort[1])
+h1RelVolume := f_atFloat(h1RelVolumeValues, h1LastClosedIndex, h1RelVolume[1])
+h1Rsi := f_atFloat(h1RsiValues, h1LastClosedIndex, h1Rsi[1])
+h1SourceTime := f_atInt(h1SourceTimeValues, h1LastClosedIndex, h1SourceTime[1])
+
+bool h1Flip = f_anyTrueThrough(h1FlipValues, h1LastClosedIndex)
+bool h1Touch1 = f_anyTrueThrough(h1Touch1Values, h1LastClosedIndex)
+bool h1Touch2 = f_anyTrueThrough(h1Touch2Values, h1LastClosedIndex)
+bool h1Touch3 = f_anyTrueThrough(h1Touch3Values, h1LastClosedIndex)
+
+[h2Trend, h2Trail, h2Extreme, h2F1, h2F2, h2F3, h2Atr, h2Flip, h2ArmId, h2ArmAge, h2Ready, h2EngineClose, h2EngineOpen, h2EngineHigh, h2EngineLow, h2CandleDirection, h2StructureLong, h2StructureShort, h2RelVolume, h2Rsi, h2Touch1, h2Touch2, h2Touch3, h2FrozenDir, h2FrozenTrail, h2FrozenExtreme, h2FrozenF1, h2FrozenF2, h2FrozenF3, h2FrozenAtr, h2FrozenTime, h2FrozenBirthTime, h2SourceTime] = request.security(syminfo.tickerid, htf, f_confirmedEngine(h2Length, h2Factor, modifiedKernel, fib1Pct, fib2Pct, fib3Pct, warmupBars), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+bool ctVisible = showCt and ctReady
+bool h1Visible = showH1 and h1Ready and not h1DuplicateOfCt
+bool h2Visible = showH2 and h2Ready and not h2DuplicateOfCt and not h2DuplicateOfH1
+bool h1NewConfirmedSource = not na(h1SourceTime) and h1SourceTime != h1SourceTime[1]
+bool h2NewConfirmedSource = not na(h2SourceTime) and h2SourceTime != h2SourceTime[1]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evidence score. It is an ordinal confluence score, never a probability.
+// Alignment 25 + Fib depth 20 + freshness 15 + structure 15 + volume 10
+// + proximity 10 + RSI location 5 = 100.
+// ─────────────────────────────────────────────────────────────────────────────
+f_alignmentScore(int _direction, int _ctTrend, int _h1Trend, int _h2Trend, bool _h1Duplicate, bool _h2DuplicateCt, bool _h2DuplicateH1) =>
+    int points = _ctTrend == _direction ? 9 : 0
+    points += not _h1Duplicate and _h1Trend == _direction ? 8 : 0
+    points += not _h2DuplicateCt and not _h2DuplicateH1 and _h2Trend == _direction ? 8 : 0
+    points
+
+f_fibDepth(int _direction, float _price, float _f1, float _f2, float _f3) =>
+    int points = 0
+    if _direction == 1
+        points := _price <= _f3 ? 20 : _price <= _f2 ? 14 : _price <= _f1 ? 8 : 0
+    else if _direction == -1
+        points := _price >= _f3 ? 20 : _price >= _f2 ? 14 : _price >= _f1 ? 8 : 0
+    points
+
+f_pressureScore(int _direction, float _price, float _trail, float _f1, float _f2, float _f3, float _atr, int _armAge, int _structureLong, int _structureShort, int _candleDirection, float _relVolume, float _rsiValue, int _alignment, int _freshAge, float _proximityFactor) =>
+    int depthPoints = f_fibDepth(_direction, _price, _f1, _f2, _f3)
+    int freshnessPoints = _armAge <= _freshAge ? 15 : 8
+    int structurePoints = _direction == 1 ? _structureLong : _structureShort
+    int volumePoints = _candleDirection == _direction ? (_relVolume >= 1.2 ? 10 : _relVolume >= 1.0 ? 5 : 0) : 0
+    float bandTop = math.max(_f1, _trail)
+    float bandBottom = math.min(_f1, _trail)
+    float distance = _price > bandTop ? _price - bandTop : _price < bandBottom ? bandBottom - _price : 0.0
+    int proximityPoints = not na(_atr) and _atr > 0 and distance <= _proximityFactor * _atr ? 10 : 0
+    int rsiPoints = _direction == 1 and _rsiValue <= 30 ? 5 : _direction == -1 and _rsiValue >= 70 ? 5 : 0
+    math.min(100, _alignment + depthPoints + freshnessPoints + structurePoints + volumePoints + proximityPoints + rsiPoints)
+
+int ctAlignment = f_alignmentScore(ctTrend, ctTrend, h1Trend, h2Trend, h1DuplicateOfCt, h2DuplicateOfCt, h2DuplicateOfH1)
+int h1Alignment = f_alignmentScore(h1Trend, ctTrend, h1Trend, h2Trend, h1DuplicateOfCt, h2DuplicateOfCt, h2DuplicateOfH1)
+int h2Alignment = f_alignmentScore(h2Trend, ctTrend, h1Trend, h2Trend, h1DuplicateOfCt, h2DuplicateOfCt, h2DuplicateOfH1)
+
+int ctScore = ctReady ? f_pressureScore(ctTrend, ctEngineClose, ctTrail, ctF1, ctF2, ctF3, ctAtr, ctArmAge, ctStructureLong, ctStructureShort, ctCandleDirection, ctRelVolume, ctRsi, ctAlignment, freshAge, proximityFactor) : 0
+int h1Score = h1Ready ? f_pressureScore(h1Trend, h1EngineClose, h1Trail, h1F1, h1F2, h1F3, h1Atr, h1ArmAge, h1StructureLong, h1StructureShort, h1CandleDirection, h1RelVolume, h1Rsi, h1Alignment, freshAge, proximityFactor) : 0
+int h2Score = h2Ready ? f_pressureScore(h2Trend, h2EngineClose, h2Trail, h2F1, h2F2, h2F3, h2Atr, h2ArmAge, h2StructureLong, h2StructureShort, h2CandleDirection, h2RelVolume, h2Rsi, h2Alignment, freshAge, proximityFactor) : 0
+float ctCommittedClose = barstate.isconfirmed ? ctEngineClose : ctEngineClose[1]
+int ctCommittedScore = barstate.isconfirmed ? ctScore : nz(ctScore[1])
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Frozen Core projection manager. Only confirmed chart executions can mutate
+// these arrays. Snapshot geometry is validated once, then remains immutable.
+// ─────────────────────────────────────────────────────────────────────────────
+f_validFrozenSnapshot(int _dir, float _f1, float _f2, float _f3, float _trail, float _extreme, float _atr, int _birthTime, int _freezeTime, float _factor) =>
+    bool complete = not na(_dir) and not na(_f1) and not na(_f2) and not na(_f3) and not na(_trail) and not na(_extreme) and not na(_atr) and _atr > 0 and not na(_birthTime) and not na(_freezeTime)
+    float width = complete ? math.abs(_f1 - _trail) : na
+    float minWidth = complete ? math.max(4.0 * syminfo.mintick, 0.05 * _atr) : na
+    float maxWidth = complete ? 3.0 * _factor * _atr : na
+    bool widthOk = complete and width >= minWidth and width <= maxWidth
+    bool outlierOk = complete and math.abs(_extreme - _trail) <= 6.0 * _factor * _atr
+    complete and widthOk and outlierOk
+
+f_storeFrozen(array<FrozenZone> _zones, int _id, string _role, int _dir, float _f1, float _f2, float _f3, float _trail, float _extreme, float _atr, int _birthTime, int _freezeTime, int _scoreAtFreeze, float _factor, int _maxZones) =>
+    bool stored = f_validFrozenSnapshot(_dir, _f1, _f2, _f3, _trail, _extreme, _atr, _birthTime, _freezeTime, _factor)
+    if stored
+        FrozenZone frozen = FrozenZone.new(_id, _role, _dir, _f1, _f2, _f3, _trail, _extreme, _atr, _birthTime, _freezeTime, 0, 0, "FRESH", _scoreAtFreeze, false, false)
+        array.push(_zones, frozen)
+        while array.size(_zones) > _maxZones
+            array.shift(_zones)
+    stored
+
+f_expireFrozen(array<FrozenZone> _zones, int _sourceTime, float _sourceSeconds, int _expiryBars) =>
+    if not na(_sourceTime) and not na(_sourceSeconds) and _sourceSeconds > 0 and array.size(_zones) > 0
+        int maxAgeMs = int(_sourceSeconds * 1000.0 * _expiryBars)
+        int i = array.size(_zones) - 1
+        while i >= 0
+            FrozenZone frozen = array.get(_zones, i)
+            if _sourceTime - frozen.freezeTime > maxAgeMs
+                array.remove(_zones, i)
+            i -= 1
+    array.size(_zones)
+
+f_updateFrozenLifecycle(array<FrozenZone> _zones, int _sourceTime, float _open, float _high, float _low, float _close) =>
+    int deepestEvent = 0
+    bool consumedEvent = false
+    bool sourceReady = not na(_sourceTime) and not na(_open) and not na(_high) and not na(_low) and not na(_close)
+    if sourceReady and array.size(_zones) > 0
+        for i = 0 to array.size(_zones) - 1
+            FrozenZone frozen = array.get(_zones, i)
+            if _sourceTime > frozen.freezeTime
+                float zoneTop = math.max(frozen.f1, frozen.trailAtFreeze)
+                float zoneBottom = math.min(frozen.f1, frozen.trailAtFreeze)
+                bool intersects = _high >= zoneBottom and _low <= zoneTop
+                bool visitStart = intersects and not frozen.intersecting
+                int depthNow = 0
+                if intersects
+                    depthNow := frozen.dir == 1 ? (_low <= frozen.f3 ? 3 : _low <= frozen.f2 ? 2 : 1) : (_high >= frozen.f3 ? 3 : _high >= frozen.f2 ? 2 : 1)
+                    frozen.deepestLevel := math.max(frozen.deepestLevel, depthNow)
+                    deepestEvent := math.max(deepestEvent, depthNow)
+                if visitStart
+                    int priorVisits = frozen.visitCount
+                    frozen.visitCount := priorVisits + 1
+                    consumedEvent := consumedEvent or (priorVisits < 3 and frozen.visitCount >= 3)
+                frozen.state := frozen.visitCount >= 3 ? "CONSUMED" : frozen.deepestLevel >= 2 ? "DEEP" : frozen.deepestLevel >= 1 ? "TESTED" : "FRESH"
+                frozen.intersecting := intersects
+    [deepestEvent, consumedEvent]
+
+f_latestFrozenVisits(array<FrozenZone> _zones) =>
+    int visits = 0
+    if array.size(_zones) > 0
+        FrozenZone frozen = array.get(_zones, array.size(_zones) - 1)
+        visits := frozen.visitCount
+    visits
+
+f_countFrozenState(array<FrozenZone> _zones, string _state) =>
+    int count = 0
+    if array.size(_zones) > 0
+        for i = 0 to array.size(_zones) - 1
+            FrozenZone frozen = array.get(_zones, i)
+            count += frozen.state == _state ? 1 : 0
+    count
+
+// A visit or deep touch alone is never a rejection. A rejection requires a
+// confirmed close back through 61.8 after 78.6-or-deeper mitigation, plus a
+// same-side candle. Each frozen CT zone can emit this transition only once.
+f_findConfirmedRejection(array<FrozenZone> _zones, bool _confirmed, float _open, float _close, float _previousClose) =>
+    bool found = false
+    int foundId = na
+    int foundDir = na
+    float foundF1 = na
+    float foundF2 = na
+    float foundF3 = na
+    float foundTrail = na
+    float foundAtr = na
+    int foundVisits = 0
+    if _confirmed and not na(_open) and not na(_close) and not na(_previousClose) and array.size(_zones) > 0
+        for offset = 0 to array.size(_zones) - 1
+            int i = array.size(_zones) - 1 - offset
+            FrozenZone frozen = array.get(_zones, i)
+            bool eligible = not found and not frozen.rejectionEmitted and frozen.state != "CONSUMED" and frozen.deepestLevel >= 2
+            bool bullishReturn = frozen.dir == 1 and _previousClose <= frozen.f1 and _close > frozen.f1 and _close > _open
+            bool bearishReturn = frozen.dir == -1 and _previousClose >= frozen.f1 and _close < frozen.f1 and _close < _open
+            if eligible and (bullishReturn or bearishReturn)
+                frozen.rejectionEmitted := true
+                found := true
+                foundId := frozen.id
+                foundDir := frozen.dir
+                foundF1 := frozen.f1
+                foundF2 := frozen.f2
+                foundF3 := frozen.f3
+                foundTrail := frozen.trailAtFreeze
+                foundAtr := frozen.atrAtFreeze
+                foundVisits := frozen.visitCount
+    [found, foundId, foundDir, foundF1, foundF2, foundF3, foundTrail, foundAtr, foundVisits]
+
+var array<FrozenZone> ltfFrozenZones = array.new<FrozenZone>()
+var array<FrozenZone> ctFrozenZones = array.new<FrozenZone>()
+var array<FrozenZone> htfFrozenZones = array.new<FrozenZone>()
+var int nextLtfFrozenId = 1
+var int nextCtFrozenId = 1
+var int nextHtfFrozenId = 1
+var int lastLtfFrozenTime = na
+var int lastCtFrozenTime = na
+var int lastHtfFrozenTime = na
+
+int ltfFrozenTouchEvent = 0
+int ctFrozenTouchEvent = 0
+int htfFrozenTouchEvent = 0
+bool ltfConsumedEvent = false
+bool ctConsumedEvent = false
+bool htfConsumedEvent = false
+
+if barstate.isconfirmed
+    if ctFlip and not na(ctFrozenTime) and (na(lastCtFrozenTime) or ctFrozenTime > lastCtFrozenTime)
+        bool ctStored = f_storeFrozen(ctFrozenZones, nextCtFrozenId, "CT", ctFrozenDir, ctFrozenF1, ctFrozenF2, ctFrozenF3, ctFrozenTrail, ctFrozenExtreme, ctFrozenAtr, ctFrozenBirthTime, ctFrozenTime, ctScore[1], ctFactor, maxFrozenZones)
+        nextCtFrozenId := nextCtFrozenId + (ctStored ? 1 : 0)
+        lastCtFrozenTime := ctFrozenTime
+
+    [ctLifecycleDepth, ctLifecycleConsumed] = f_updateFrozenLifecycle(ctFrozenZones, time, ctEngineOpen, ctEngineHigh, ctEngineLow, ctEngineClose)
+    ctFrozenTouchEvent := ctLifecycleDepth
+    ctConsumedEvent := ctLifecycleConsumed
+
+    if not na(h1LastClosedIndex) and h1LastClosedIndex >= 0
+        for i = 0 to h1LastClosedIndex
+            int eventDir = array.get(h1FrozenDirValues, i)
+            int eventTime = array.get(h1FrozenTimeValues, i)
+            if not na(eventDir) and not na(eventTime) and (na(lastLtfFrozenTime) or eventTime > lastLtfFrozenTime)
+                bool ltfStored = f_storeFrozen(ltfFrozenZones, nextLtfFrozenId, "LTF", eventDir, array.get(h1FrozenF1Values, i), array.get(h1FrozenF2Values, i), array.get(h1FrozenF3Values, i), array.get(h1FrozenTrailValues, i), array.get(h1FrozenExtremeValues, i), array.get(h1FrozenAtrValues, i), array.get(h1FrozenBirthTimeValues, i), eventTime, int(na), h1Factor, maxFrozenZones)
+                nextLtfFrozenId := nextLtfFrozenId + (ltfStored ? 1 : 0)
+                lastLtfFrozenTime := eventTime
+            [ltfLifecycleDepth, ltfLifecycleConsumed] = f_updateFrozenLifecycle(ltfFrozenZones, array.get(h1SourceTimeValues, i), array.get(h1EngineOpenValues, i), array.get(h1EngineHighValues, i), array.get(h1EngineLowValues, i), array.get(h1EngineCloseValues, i))
+            ltfFrozenTouchEvent := math.max(ltfFrozenTouchEvent, ltfLifecycleDepth)
+            ltfConsumedEvent := ltfConsumedEvent or ltfLifecycleConsumed
+
+    if h2Flip and not na(h2FrozenTime) and (na(lastHtfFrozenTime) or h2FrozenTime > lastHtfFrozenTime)
+        bool htfStored = f_storeFrozen(htfFrozenZones, nextHtfFrozenId, "HTF", h2FrozenDir, h2FrozenF1, h2FrozenF2, h2FrozenF3, h2FrozenTrail, h2FrozenExtreme, h2FrozenAtr, h2FrozenBirthTime, h2FrozenTime, int(na), h2Factor, maxFrozenZones)
+        nextHtfFrozenId := nextHtfFrozenId + (htfStored ? 1 : 0)
+        lastHtfFrozenTime := h2FrozenTime
+
+    bool htfSourceAdvanced = not na(h2SourceTime) and h2SourceTime != h2SourceTime[1]
+    if htfSourceAdvanced
+        [htfLifecycleDepth, htfLifecycleConsumed] = f_updateFrozenLifecycle(htfFrozenZones, h2SourceTime, h2EngineOpen, h2EngineHigh, h2EngineLow, h2EngineClose)
+        htfFrozenTouchEvent := htfLifecycleDepth
+        htfConsumedEvent := htfLifecycleConsumed
+
+    int frozenExpiryBars = maxFrozenZones * freshAge
+    f_expireFrozen(ltfFrozenZones, h1SourceTime, h1Seconds, frozenExpiryBars)
+    f_expireFrozen(ctFrozenZones, time, chartSeconds, frozenExpiryBars)
+    f_expireFrozen(htfFrozenZones, h2SourceTime, h2Seconds, frozenExpiryBars)
+
+var bool ctHighPressure = false
+var bool h1HighPressure = false
+var bool h2HighPressure = false
+var int ctConfirmCount = 0
+var int ctReleaseCount = 0
+var int h1ConfirmCount = 0
+var int h1ReleaseCount = 0
+var int h2ConfirmCount = 0
+var int h2ReleaseCount = 0
+
+if barstate.isconfirmed
+    ctConfirmCount := ctScore >= pressureGate ? ctConfirmCount + 1 : 0
+    ctReleaseCount := ctScore < pressureGate ? ctReleaseCount + 1 : 0
+    h1ConfirmCount := h1Score >= pressureGate ? h1ConfirmCount + 1 : 0
+    h1ReleaseCount := h1Score < pressureGate ? h1ReleaseCount + 1 : 0
+    if h2NewConfirmedSource
+        h2ConfirmCount := h2Score >= pressureGate ? h2ConfirmCount + 1 : 0
+        h2ReleaseCount := h2Score < pressureGate ? h2ReleaseCount + 1 : 0
+
+    if not ctHighPressure and ctConfirmCount >= hysteresisBars
+        ctHighPressure := true
+    else if ctHighPressure and ctReleaseCount >= hysteresisBars
+        ctHighPressure := false
+
+    if not h1HighPressure and h1ConfirmCount >= hysteresisBars
+        h1HighPressure := true
+    else if h1HighPressure and h1ReleaseCount >= hysteresisBars
+        h1HighPressure := false
+
+    if h2NewConfirmedSource
+        if not h2HighPressure and h2ConfirmCount >= hysteresisBars
+            h2HighPressure := true
+        else if h2HighPressure and h2ReleaseCount >= hysteresisBars
+            h2HighPressure := false
+
+f_tfText(string _tf) =>
+    float seconds = timeframe.in_seconds(_tf)
+    string result = _tf
+    if not na(seconds)
+        result := seconds < 3600 ? str.tostring(int(seconds / 60)) + "m" : seconds < 86400 ? str.tostring(int(seconds / 3600)) + "H" : str.tostring(int(seconds / 86400)) + "D"
+    result
+
+f_stateText(bool _ready, bool _highPressure, int _trend) =>
+    not _ready ? "MISSING" : _highPressure ? (_trend == 1 ? "HIGH BULL" : "HIGH BEAR") : (_trend == 1 ? "REG BULL" : "REG BEAR")
+
+f_distanceAtr(float _price, float _f1, float _trail, float _atr) =>
+    float top = math.max(_f1, _trail)
+    float bottom = math.min(_f1, _trail)
+    float distance = _price > top ? _price - top : _price < bottom ? bottom - _price : 0.0
+    not na(_atr) and _atr > 0 ? distance / _atr : na
+
+f_resolveExternalTarget(int _direction, float _price, bool _dynamicReady, int _dynamicTrend, float _dynamicF1, float _dynamicTrail, int _dynamicArmId, array<FrozenZone> _frozenZones, bool _useFrozen) =>
+    float bestTop = na
+    float bestBottom = na
+    float bestDistance = na
+    int bestKind = 0
+    int bestId = na
+    if _dynamicReady and _dynamicTrend == -_direction and not na(_dynamicF1) and not na(_dynamicTrail)
+        float candidateTop = math.max(_dynamicF1, _dynamicTrail)
+        float candidateBottom = math.min(_dynamicF1, _dynamicTrail)
+        bool ahead = _direction == 1 ? candidateBottom > _price : candidateTop < _price
+        if ahead
+            bestTop := candidateTop
+            bestBottom := candidateBottom
+            bestDistance := _direction == 1 ? candidateBottom - _price : _price - candidateTop
+            bestKind := 1
+            bestId := _dynamicArmId
+    if _useFrozen and array.size(_frozenZones) > 0
+        for i = 0 to array.size(_frozenZones) - 1
+            FrozenZone frozen = array.get(_frozenZones, i)
+            float candidateTop = math.max(frozen.f1, frozen.trailAtFreeze)
+            float candidateBottom = math.min(frozen.f1, frozen.trailAtFreeze)
+            bool opposing = frozen.dir == -_direction
+            bool ahead = _direction == 1 ? candidateBottom > _price : candidateTop < _price
+            float distance = _direction == 1 ? candidateBottom - _price : _price - candidateTop
+            bool eligible = frozen.state != "CONSUMED" and opposing and ahead
+            if eligible and (na(bestDistance) or distance < bestDistance)
+                bestTop := candidateTop
+                bestBottom := candidateBottom
+                bestDistance := distance
+                bestKind := 2
+                bestId := frozen.id
+    [bestTop, bestBottom, bestKind, bestId]
+
+bool htfDataStale = h2Ready and not na(h2SourceTime) and time - h2SourceTime > int(h2Seconds * 1000.0 * 2.0)
+float targetReferencePrice = barstate.isconfirmed ? nz(ctEngineClose[1], ctEngineClose) : ctEngineClose[1]
+[externalTargetTop, externalTargetBottom, externalTargetKind, externalTargetId] = f_resolveExternalTarget(ctTrend, targetReferencePrice, h2Ready and not htfDataStale, h2Trend, h2F1, h2Trail, h2ArmId, htfFrozenZones, useFrozenTargets and not htfDataStale)
+bool externalTargetCandidate = not na(externalTargetTop) and not na(externalTargetBottom) and externalTargetKind > 0 and not na(externalTargetId)
+string externalTargetKey = externalTargetCandidate ? str.tostring(ctTrend) + ":" + str.tostring(externalTargetKind) + ":" + str.tostring(externalTargetId) : "NONE"
+var string reachedExternalTargetKey = ""
+bool externalTargetReachedEvent = barstate.isconfirmed and externalTargetCandidate and externalTargetKey != reachedExternalTargetKey and (ctTrend == 1 ? high >= externalTargetBottom : low <= externalTargetTop)
+if barstate.isconfirmed
+    if ctFlip
+        reachedExternalTargetKey := ""
+    if externalTargetReachedEvent
+        reachedExternalTargetKey := externalTargetKey
+bool externalTargetActive = externalTargetCandidate and externalTargetKey != reachedExternalTargetKey
+
+float riskInvalidation = ctReady ? ctTrail : na
+float riskHardStop = ctReady and not na(ctAtr) ? (ctTrend == 1 ? riskInvalidation - stopBufferAtr * ctAtr : riskInvalidation + stopBufferAtr * ctAtr) : na
+float riskTargetPrice = externalTargetActive ? (ctTrend == 1 ? externalTargetBottom : externalTargetTop) : na
+bool baseRiskOrderValid = ctReady and not na(ctCommittedClose) and not na(riskHardStop) and (ctTrend == 1 ? riskHardStop < riskInvalidation and riskInvalidation < ctCommittedClose : riskHardStop > riskInvalidation and riskInvalidation > ctCommittedClose)
+bool fullRiskOrderValid = baseRiskOrderValid and externalTargetActive and (ctTrend == 1 ? ctCommittedClose < riskTargetPrice : ctCommittedClose > riskTargetPrice)
+float riskPoints = baseRiskOrderValid ? math.abs(ctCommittedClose - riskHardStop) : na
+float rewardPoints = fullRiskOrderValid ? math.abs(riskTargetPrice - ctCommittedClose) : na
+float riskReward = fullRiskOrderValid and riskPoints > 0 ? rewardPoints / riskPoints : na
+
+[confirmedRejectionEvent, rejectionZoneId, rejectionDir, rejectionF1, rejectionF2, rejectionF3, rejectionTrail, rejectionAtr, rejectionVisits] = f_findConfirmedRejection(ctFrozenZones, barstate.isconfirmed, ctEngineOpen, ctEngineClose, ctEngineClose[1])
+[rejectionTargetTop, rejectionTargetBottom, rejectionTargetKind, rejectionTargetId] = f_resolveExternalTarget(rejectionDir, ctEngineClose, confirmedRejectionEvent and h2Ready and not htfDataStale, h2Trend, h2F1, h2Trail, h2ArmId, htfFrozenZones, useFrozenTargets and not htfDataStale)
+float rejectionInvalidation = confirmedRejectionEvent ? rejectionTrail : na
+float rejectionHardStop = confirmedRejectionEvent and not na(rejectionAtr) ? (rejectionDir == 1 ? rejectionInvalidation - stopBufferAtr * rejectionAtr : rejectionInvalidation + stopBufferAtr * rejectionAtr) : na
+float rejectionTargetPrice = confirmedRejectionEvent and not na(rejectionTargetTop) and not na(rejectionTargetBottom) ? (rejectionDir == 1 ? rejectionTargetBottom : rejectionTargetTop) : na
+bool rejectionRiskOrderValid = confirmedRejectionEvent and not na(rejectionHardStop) and (rejectionDir == 1 ? rejectionHardStop < rejectionInvalidation and rejectionInvalidation < ctEngineClose : rejectionHardStop > rejectionInvalidation and rejectionInvalidation > ctEngineClose)
+bool rejectionTargetOrderValid = rejectionRiskOrderValid and not na(rejectionTargetPrice) and (rejectionDir == 1 ? ctEngineClose < rejectionTargetPrice : ctEngineClose > rejectionTargetPrice)
+float rejectionRiskPoints = rejectionRiskOrderValid ? math.abs(ctEngineClose - rejectionHardStop) : na
+float rejectionRewardPoints = rejectionTargetOrderValid ? math.abs(rejectionTargetPrice - ctEngineClose) : na
+float rejectionRr = rejectionTargetOrderValid and rejectionRiskPoints > 0 ? rejectionRewardPoints / rejectionRiskPoints : na
+bool rejectionScenarioValid = rejectionTargetOrderValid and not htfDataStale and rejectionRr >= minimumScenarioRr
+
+float chartRsiForColor = ta.rsi(close, rsiLength)
+color rsiCandleColor = enableRsiCandles ? (chartRsiForColor >= rsiOverbought ? rsiOverboughtColor : chartRsiForColor <= rsiOversold ? rsiOversoldColor : na) : na
+barcolor(rsiCandleColor, title = "Optional RSI candle state")
+plotshape(showRejectionMarkers and confirmedRejectionEvent and rejectionDir == 1, title = "Confirmed bullish rejection", style = shape.triangleup, location = location.belowbar, color = color.rgb(21, 101, 192), size = size.tiny, text = "")
+plotshape(showRejectionMarkers and confirmedRejectionEvent and rejectionDir == -1, title = "Confirmed bearish rejection", style = shape.triangledown, location = location.abovebar, color = color.rgb(201, 162, 39), size = size.tiny, text = "")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering order: HTF (back) -> CT -> LTF (front). White boundaries carry
+// price truth; trend color is confined to the fill and trail identity.
+// ─────────────────────────────────────────────────────────────────────────────
+color BULL_FILL = color.rgb(27, 94, 32)
+color BEAR_FILL = color.rgb(127, 29, 29)
+color BULL_TRAIL = color.rgb(38, 166, 154)
+color BEAR_TRAIL = color.rgb(239, 83, 80)
+color HIGH_BULL = color.rgb(21, 101, 192)
+color HIGH_BEAR = color.rgb(201, 162, 39)
+color WHITE = color.rgb(238, 242, 247)
+
+color h2Base = h2HighPressure ? (h2Trend == 1 ? HIGH_BULL : HIGH_BEAR) : (h2Trend == 1 ? BULL_FILL : BEAR_FILL)
+color h2Outer = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(h2Base, 88)
+color h2Middle = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(h2Base, 80)
+color h2Deep = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(h2Base, 72)
+h2p1 = plot(h2Visible ? h2F1 : na, "HTF Fib 61.8", color = color.new(WHITE, 52), linewidth = 1, style = plot.style_stepline)
+h2p2 = plot(h2Visible ? h2F2 : na, "HTF Fib 78.6", color = color.new(WHITE, 38), linewidth = 1, style = plot.style_stepline)
+h2p3 = plot(h2Visible ? h2F3 : na, "HTF Fib 88.6", color = color.new(WHITE, 25), linewidth = 1, style = plot.style_stepline)
+h2pT = plot(h2Visible ? h2Trail : na, "HTF SwingArm / 100", color = h2HighPressure ? h2Base : h2Trend == 1 ? BULL_TRAIL : BEAR_TRAIL, linewidth = 1, style = plot.style_stepline)
+fill(h2p1, h2p2, color = h2Outer, title = "HTF 61.8–78.6")
+fill(h2p2, h2p3, color = h2Middle, title = "HTF 78.6–88.6")
+fill(h2p3, h2pT, color = h2Deep, title = "HTF 88.6–100")
+
+color ctBase = ctHighPressure ? (ctTrend == 1 ? HIGH_BULL : HIGH_BEAR) : (ctTrend == 1 ? BULL_FILL : BEAR_FILL)
+color ctOuter = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(ctBase, 80)
+color ctMiddle = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(ctBase, 72)
+color ctDeep = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(ctBase, 64)
+ctp1 = plot(ctVisible ? ctF1 : na, "CT Fib 61.8", color = color.new(WHITE, 35), linewidth = 1, style = plot.style_linebr)
+ctp2 = plot(ctVisible ? ctF2 : na, "CT Fib 78.6", color = color.new(WHITE, 20), linewidth = 1, style = plot.style_linebr)
+ctp3 = plot(ctVisible ? ctF3 : na, "CT Fib 88.6", color = color.new(WHITE, 35), linewidth = 1, style = plot.style_linebr)
+ctpT = plot(ctVisible ? ctTrail : na, "CT SwingArm / 100", color = ctHighPressure ? ctBase : ctTrend == 1 ? BULL_TRAIL : BEAR_TRAIL, linewidth = 2, style = plot.style_linebr)
+fill(ctp1, ctp2, color = ctOuter, title = "CT 61.8–78.6")
+fill(ctp2, ctp3, color = ctMiddle, title = "CT 78.6–88.6")
+fill(ctp3, ctpT, color = ctDeep, title = "CT 88.6–100")
+
+color h1Base = h1HighPressure ? (h1Trend == 1 ? HIGH_BULL : HIGH_BEAR) : (h1Trend == 1 ? BULL_FILL : BEAR_FILL)
+color h1Outer = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(h1Base, 84)
+color h1Middle = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(h1Base, 76)
+color h1Deep = reducedEffects or displayDensity == "CAPTURE" ? na : color.new(h1Base, 68)
+h1p1 = plot(h1Visible ? h1F1 : na, "LTF Fib 61.8", color = color.new(WHITE, 45), linewidth = 1, style = plot.style_stepline)
+h1p2 = plot(h1Visible ? h1F2 : na, "LTF Fib 78.6", color = color.new(WHITE, 30), linewidth = 1, style = plot.style_stepline)
+h1p3 = plot(h1Visible ? h1F3 : na, "LTF Fib 88.6", color = color.new(WHITE, 18), linewidth = 1, style = plot.style_stepline)
+h1pT = plot(h1Visible ? h1Trail : na, "LTF SwingArm / 100", color = h1HighPressure ? h1Base : h1Trend == 1 ? BULL_TRAIL : BEAR_TRAIL, linewidth = 1, style = plot.style_stepline)
+fill(h1p1, h1p2, color = h1Outer, title = "LTF 61.8–78.6")
+fill(h1p2, h1p3, color = h1Middle, title = "LTF 78.6–88.6")
+fill(h1p3, h1pT, color = h1Deep, title = "LTF 88.6–100")
+
+// External Target and Risk Geometry use only confirmed existing prices.
+// Horizontal extent is a view window, not a projected future price path.
+var box externalTargetBox = na
+var line riskHardStopLine = na
+if barstate.islast
+    color targetColor = ctTrend == 1 ? HIGH_BULL : HIGH_BEAR
+    if showExternalTarget and displayDensity != "CAPTURE" and externalTargetActive
+        if na(externalTargetBox)
+            externalTargetBox := box.new(left = bar_index, top = externalTargetTop, right = bar_index + geometryBars, bottom = externalTargetBottom, xloc = xloc.bar_index, extend = extend.none, border_color = targetColor, border_width = 2, border_style = line.style_dashed, bgcolor = color.new(targetColor, 92))
+        else
+            box.set_left(externalTargetBox, bar_index)
+            box.set_right(externalTargetBox, bar_index + geometryBars)
+            box.set_top(externalTargetBox, externalTargetTop)
+            box.set_bottom(externalTargetBox, externalTargetBottom)
+            box.set_border_color(externalTargetBox, targetColor)
+            box.set_bgcolor(externalTargetBox, color.new(targetColor, 92))
+    else if not na(externalTargetBox)
+        box.delete(externalTargetBox)
+        externalTargetBox := na
+
+    if showRiskGeometry and displayDensity != "CAPTURE" and baseRiskOrderValid
+        if na(riskHardStopLine)
+            riskHardStopLine := line.new(x1 = bar_index, y1 = riskHardStop, x2 = bar_index + geometryBars, y2 = riskHardStop, xloc = xloc.bar_index, extend = extend.none, color = color.new(color.red, 12), style = line.style_dashed, width = 1)
+        else
+            line.set_xy1(riskHardStopLine, bar_index, riskHardStop)
+            line.set_xy2(riskHardStopLine, bar_index + geometryBars, riskHardStop)
+            line.set_color(riskHardStopLine, color.new(color.red, 12))
+    else if not na(riskHardStopLine)
+        line.delete(riskHardStopLine)
+        riskHardStopLine := na
+
+// Latest bounded Optimal Entry geometry. It is current confirmed geometry,
+// not a projected future price. Each box extends only five chart bars.
+f_updateOptimalBox(box _current, bool _active, int _direction, float _f2, float _trail, color _sideColor) =>
+    box result = _current
+    if _active and not na(_f2) and not na(_trail)
+        float top = math.max(_f2, _trail)
+        float bottom = math.min(_f2, _trail)
+        if na(result)
+            result := box.new(left = bar_index, top = top, right = bar_index + 5, bottom = bottom, xloc = xloc.bar_index, extend = extend.none, border_color = _sideColor, border_width = 2, bgcolor = color.new(_sideColor, 75))
+        else
+            box.set_left(result, bar_index)
+            box.set_right(result, bar_index + 5)
+            box.set_top(result, top)
+            box.set_bottom(result, bottom)
+            box.set_border_color(result, _sideColor)
+            box.set_bgcolor(result, color.new(_sideColor, 75))
+    else if not na(result)
+        box.delete(result)
+        result := na
+    result
+
+var box ctOptimalBox = na
+var box h1OptimalBox = na
+var box h2OptimalBox = na
+
+if barstate.isconfirmed
+    ctOptimalBox := f_updateOptimalBox(ctOptimalBox, showOptimalEntry and displayDensity != "CAPTURE" and ctVisible and ctHighPressure, ctTrend, ctF2, ctTrail, ctTrend == 1 ? HIGH_BULL : HIGH_BEAR)
+    h1OptimalBox := f_updateOptimalBox(h1OptimalBox, showOptimalEntry and displayDensity != "CAPTURE" and h1Visible and h1HighPressure, h1Trend, h1F2, h1Trail, h1Trend == 1 ? HIGH_BULL : HIGH_BEAR)
+    h2OptimalBox := f_updateOptimalBox(h2OptimalBox, showOptimalEntry and displayDensity != "CAPTURE" and h2Visible and h2HighPressure, h2Trend, h2F2, h2Trail, h2Trend == 1 ? HIGH_BULL : HIGH_BEAR)
+
+// Latest-value rails. No future value is calculated; labels are placed a
+// bounded number of bars to the right at the current confirmed price level.
+f_updateRail(label _current, bool _active, int _x, float _y, string _text, color _background, color _foreground) =>
+    label result = _current
+    if _active and not na(_y)
+        if na(result)
+            result := label.new(x = _x, y = _y, text = _text, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = _background, textcolor = _foreground, size = size.tiny)
+        else
+            label.set_xy(result, _x, _y)
+            label.set_text(result, _text)
+            label.set_color(result, _background)
+            label.set_textcolor(result, _foreground)
+    else if not na(result)
+        label.delete(result)
+        result := na
+    result
+
+var label ctRailF1 = na
+var label ctRailF2 = na
+var label ctRailF3 = na
+var label ctRailArm = na
+var label h1RailF1 = na
+var label h1RailF2 = na
+var label h1RailF3 = na
+var label h1RailArm = na
+var label h2RailF1 = na
+var label h2RailF2 = na
+var label h2RailF3 = na
+var label h2RailArm = na
+
+if barstate.islast
+    bool railFull = displayDensity == "FULL"
+    bool railReduced = displayDensity == "REDUCED"
+    bool showRailF1 = showRailLabels and railFull
+    bool showRailF2 = showRailLabels and railFull
+    bool showRailF3 = showRailLabels and (railFull or railReduced)
+    bool showRailArm = showRailLabels and displayDensity != "CAPTURE"
+
+    string ctTfText = f_tfText(timeframe.period)
+    string h1TfText = f_tfText(ltf)
+    string h2TfText = f_tfText(htf)
+    string ctClassText = ctHighPressure ? "HIGH" : "REG"
+    string h1ClassText = h1HighPressure ? "HIGH" : "REG"
+    string h2ClassText = h2HighPressure ? "HIGH" : "REG"
+    color ctRailColor = ctHighPressure ? (ctTrend == 1 ? HIGH_BULL : HIGH_BEAR) : color.new(ctTrend == 1 ? BULL_FILL : BEAR_FILL, 8)
+    color h1RailColor = h1HighPressure ? (h1Trend == 1 ? HIGH_BULL : HIGH_BEAR) : color.new(h1Trend == 1 ? BULL_FILL : BEAR_FILL, 8)
+    color h2RailColor = h2HighPressure ? (h2Trend == 1 ? HIGH_BULL : HIGH_BEAR) : color.new(h2Trend == 1 ? BULL_FILL : BEAR_FILL, 8)
+    color ctRailText = ctHighPressure and ctTrend == -1 ? color.black : color.white
+    color h1RailText = h1HighPressure and h1Trend == -1 ? color.black : color.white
+    color h2RailText = h2HighPressure and h2Trend == -1 ? color.black : color.white
+    int ctX = bar_index + railOffset
+    int h1X = bar_index + math.min(15, railOffset + 3)
+    int h2X = bar_index + math.min(15, railOffset + 6)
+
+    ctRailF1 := f_updateRail(ctRailF1, ctVisible and showRailF1, ctX, ctF1, ctTfText + " 61.8% · " + str.tostring(ctCommittedScore) + "/100 " + ctClassText, ctRailColor, ctRailText)
+    ctRailF2 := f_updateRail(ctRailF2, ctVisible and showRailF2, ctX, ctF2, ctTfText + " 78.6% · " + str.tostring(ctCommittedScore) + "/100 " + ctClassText, ctRailColor, ctRailText)
+    ctRailF3 := f_updateRail(ctRailF3, ctVisible and showRailF3, ctX, ctF3, ctTfText + " 88.6% · " + str.tostring(ctCommittedScore) + "/100 " + ctClassText, ctRailColor, ctRailText)
+    ctRailArm := f_updateRail(ctRailArm, ctVisible and showRailArm, ctX, ctTrail, ctTfText + " ARM " + str.tostring(ctLength) + "/" + str.tostring(ctFactor, "#.0") + " · " + str.tostring(ctCommittedScore) + "/100 " + ctClassText, ctRailColor, ctRailText)
+
+    h1RailF1 := f_updateRail(h1RailF1, h1Visible and showRailF1, h1X, h1F1, h1TfText + " 61.8% · " + str.tostring(h1Score) + "/100 " + h1ClassText, h1RailColor, h1RailText)
+    h1RailF2 := f_updateRail(h1RailF2, h1Visible and showRailF2, h1X, h1F2, h1TfText + " 78.6% · " + str.tostring(h1Score) + "/100 " + h1ClassText, h1RailColor, h1RailText)
+    h1RailF3 := f_updateRail(h1RailF3, h1Visible and showRailF3, h1X, h1F3, h1TfText + " 88.6% · " + str.tostring(h1Score) + "/100 " + h1ClassText, h1RailColor, h1RailText)
+    h1RailArm := f_updateRail(h1RailArm, h1Visible and showRailArm, h1X, h1Trail, h1TfText + " ARM " + str.tostring(h1Length) + "/" + str.tostring(h1Factor, "#.0") + " · " + str.tostring(h1Score) + "/100 " + h1ClassText, h1RailColor, h1RailText)
+
+    h2RailF1 := f_updateRail(h2RailF1, h2Visible and showRailF1, h2X, h2F1, h2TfText + " 61.8% · " + str.tostring(h2Score) + "/100 " + h2ClassText, h2RailColor, h2RailText)
+    h2RailF2 := f_updateRail(h2RailF2, h2Visible and showRailF2, h2X, h2F2, h2TfText + " 78.6% · " + str.tostring(h2Score) + "/100 " + h2ClassText, h2RailColor, h2RailText)
+    h2RailF3 := f_updateRail(h2RailF3, h2Visible and showRailF3, h2X, h2F3, h2TfText + " 88.6% · " + str.tostring(h2Score) + "/100 " + h2ClassText, h2RailColor, h2RailText)
+    h2RailArm := f_updateRail(h2RailArm, h2Visible and showRailArm, h2X, h2Trail, h2TfText + " ARM " + str.tostring(h2Length) + "/" + str.tostring(h2Factor, "#.0") + " · " + str.tostring(h2Score) + "/100 " + h2ClassText, h2RailColor, h2RailText)
+
+// Confirmed Fib-touch history. HTF events are emitted only when their
+// confirmed source time changes, preventing repeated labels on projected bars.
+f_gradeText(int _score) =>
+    _score >= 70 ? "STRONG" : _score >= 55 ? "GOOD" : _score >= 40 ? "WEAK" : "POOR"
+
+f_emitTouch(array<label> _store, string _tfText, string _levelText, int _direction, float _price, int _score, int _maxCount) =>
+    bool highClass = _score >= pressureGate
+    color sideColor = highClass ? (_direction == 1 ? HIGH_BULL : HIGH_BEAR) : (_direction == 1 ? BULL_FILL : BEAR_FILL)
+    color textColor = highClass and _direction == -1 ? color.black : color.white
+    string eventText = _tfText + " " + _levelText + "% · " + str.tostring(_score) + "/100 " + f_gradeText(_score)
+    label eventLabel = label.new(x = bar_index, y = _price, text = eventText, xloc = xloc.bar_index, yloc = yloc.price, style = _direction == 1 ? label.style_label_up : label.style_label_down, color = color.new(sideColor, 8), textcolor = textColor, size = size.tiny)
+    array.push(_store, eventLabel)
+    while array.size(_store) > _maxCount
+        label.delete(array.shift(_store))
+    true
+
+var array<label> touchHistory = array.new<label>()
+var int lastCtTouch1 = -1000000
+var int lastCtTouch2 = -1000000
+var int lastCtTouch3 = -1000000
+var int lastH1Touch1 = -1000000
+var int lastH1Touch2 = -1000000
+var int lastH1Touch3 = -1000000
+var int lastH2Touch1 = -1000000
+var int lastH2Touch2 = -1000000
+var int lastH2Touch3 = -1000000
+
+bool touchLabelsActive = showTouchLabels and displayDensity != "CAPTURE"
+int minimumTouchSpacing = labelSpacing * 5
+
+if barstate.isconfirmed and touchLabelsActive
+    if ctTouch1 and ctScore >= touchMinScore and bar_index - lastCtTouch1 >= minimumTouchSpacing
+        lastCtTouch1 := bar_index
+        f_emitTouch(touchHistory, f_tfText(timeframe.period), "61.8", ctTrend[1], ctF1[1], ctScore, maxTouchLabels)
+    if ctTouch2 and ctScore >= touchMinScore and bar_index - lastCtTouch2 >= minimumTouchSpacing
+        lastCtTouch2 := bar_index
+        f_emitTouch(touchHistory, f_tfText(timeframe.period), "78.6", ctTrend[1], ctF2[1], ctScore, maxTouchLabels)
+    if ctTouch3 and ctScore >= touchMinScore and bar_index - lastCtTouch3 >= minimumTouchSpacing
+        lastCtTouch3 := bar_index
+        f_emitTouch(touchHistory, f_tfText(timeframe.period), "88.6", ctTrend[1], ctF3[1], ctScore, maxTouchLabels)
+
+    if h1NewConfirmedSource and h1Touch1 and h1Score >= touchMinScore and bar_index - lastH1Touch1 >= minimumTouchSpacing
+        lastH1Touch1 := bar_index
+        f_emitTouch(touchHistory, f_tfText(ltf), "61.8", h1Trend[1], h1F1[1], h1Score, maxTouchLabels)
+    if h1NewConfirmedSource and h1Touch2 and h1Score >= touchMinScore and bar_index - lastH1Touch2 >= minimumTouchSpacing
+        lastH1Touch2 := bar_index
+        f_emitTouch(touchHistory, f_tfText(ltf), "78.6", h1Trend[1], h1F2[1], h1Score, maxTouchLabels)
+    if h1NewConfirmedSource and h1Touch3 and h1Score >= touchMinScore and bar_index - lastH1Touch3 >= minimumTouchSpacing
+        lastH1Touch3 := bar_index
+        f_emitTouch(touchHistory, f_tfText(ltf), "88.6", h1Trend[1], h1F3[1], h1Score, maxTouchLabels)
+
+    if h2NewConfirmedSource and h2Touch1 and h2Score >= touchMinScore and bar_index - lastH2Touch1 >= minimumTouchSpacing
+        lastH2Touch1 := bar_index
+        f_emitTouch(touchHistory, f_tfText(htf), "61.8", h2Trend[1], h2F1[1], h2Score, maxTouchLabels)
+    if h2NewConfirmedSource and h2Touch2 and h2Score >= touchMinScore and bar_index - lastH2Touch2 >= minimumTouchSpacing
+        lastH2Touch2 := bar_index
+        f_emitTouch(touchHistory, f_tfText(htf), "78.6", h2Trend[1], h2F2[1], h2Score, maxTouchLabels)
+    if h2NewConfirmedSource and h2Touch3 and h2Score >= touchMinScore and bar_index - lastH2Touch3 >= minimumTouchSpacing
+        lastH2Touch3 := bar_index
+        f_emitTouch(touchHistory, f_tfText(htf), "88.6", h2Trend[1], h2F3[1], h2Score, maxTouchLabels)
+
+if barstate.islast and not touchLabelsActive
+    while array.size(touchHistory) > 0
+        label.delete(array.pop(touchHistory))
+
+// One confirmed dispatcher keeps output-series usage bounded. Informational
+// events stay plain text. Only a complete, ordered, minimum-R:R rejection may
+// cross the NQX_ATR_PRESSURE/1 JSON boundary.
+f_trendText(int _trend) =>
+    _trend == 1 ? "BULL" : _trend == -1 ? "BEAR" : "MISSING"
+
+f_jsonNumber(float _value) =>
+    na(_value) ? "null" : str.tostring(_value, format.mintick)
+
+f_rejectionJson(string _side, int _score, bool _oeActive) =>
+    float zoneLow = math.min(rejectionF1, rejectionTrail)
+    float zoneHigh = math.max(rejectionF1, rejectionTrail)
+    float structureLow = h1Ready ? math.min(h1F1, h1Trail) : na
+    float structureHigh = h1Ready ? math.max(h1F1, h1Trail) : na
+    float contextLow = h2Ready and not htfDataStale ? math.min(h2F1, h2Trail) : na
+    float contextHigh = h2Ready and not htfDataStale ? math.max(h2F1, h2Trail) : na
+    '{"schema":"NQX_ATR_PRESSURE/1","indicator_version":"2.0","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","event":"CONFIRMED_REJECTION","side":"' + _side + '","atr_kernel":"' + trailType + '","pressure_score":' + str.tostring(_score) + ',"score_is_probability":false,"zone_low":' + f_jsonNumber(zoneLow) + ',"zone_high":' + f_jsonNumber(zoneHigh) + ',"fib_618":' + f_jsonNumber(rejectionF1) + ',"fib_786":' + f_jsonNumber(rejectionF2) + ',"fib_886":' + f_jsonNumber(rejectionF3) + ',"invalidation":' + f_jsonNumber(rejectionInvalidation) + ',"hard_stop":' + f_jsonNumber(rejectionHardStop) + ',"zone_state":"DEEP","zone_stale":false,"visit_count":' + str.tostring(rejectionVisits) + ',"structure_tf":"' + ltf + '","structure_zone_low":' + f_jsonNumber(structureLow) + ',"structure_zone_high":' + f_jsonNumber(structureHigh) + ',"structure_visits":' + str.tostring(f_latestFrozenVisits(ltfFrozenZones)) + ',"context_tf":"' + htf + '","context_zone_low":' + f_jsonNumber(contextLow) + ',"context_zone_high":' + f_jsonNumber(contextHigh) + ',"context_visits":' + str.tostring(f_latestFrozenVisits(htfFrozenZones)) + ',"htf1_state":"' + f_trendText(h1Trend) + '","htf2_state":"' + f_trendText(h2Trend) + '","confirmed_bar":true,"engine":"CT","score":' + str.tostring(_score) + ',"grade":"' + f_gradeText(_score) + '","oe_active":' + (_oeActive ? "true" : "false") + '}'
+
+int ctStructureState = ctStructureLong > ctStructureShort ? 1 : ctStructureShort > ctStructureLong ? -1 : 0
+bool structureChangeEvent = barstate.isconfirmed and ctReady and not na(ctStructureState[1]) and ctStructureState != ctStructureState[1]
+bool optimalEntryEvent = barstate.isconfirmed and ctHighPressure and not ctHighPressure[1]
+bool anyFreshZoneEvent = barstate.isconfirmed and (ctFlip or h1Flip or (h2NewConfirmedSource and h2Flip))
+bool anyTouchEvent = barstate.isconfirmed and (ctTouch1 or ctTouch2 or ctTouch3 or h1Touch1 or h1Touch2 or h1Touch3 or (h2NewConfirmedSource and (h2Touch1 or h2Touch2 or h2Touch3)))
+bool anyConsumedEvent = barstate.isconfirmed and (ctConsumedEvent or ltfConsumedEvent or htfConsumedEvent)
+bool alertSessionActive = not sessionFilteredAlerts or not na(time(timeframe.period, alertSession))
+bool rejectionOeActive = ctHighPressure and ctTrend == rejectionDir
+string rejectionNoTradeReason = htfDataStale ? "STALE HTF" : not rejectionRiskOrderValid ? "INVALID RISK ORDER" : not rejectionTargetOrderValid ? "NO VALID TARGET" : rejectionRr < minimumScenarioRr ? "R:R BELOW GATE" : "INCOMPLETE"
+
+if barstate.isconfirmed and alertSessionActive
+    string eventMessage = ""
+    if confirmedRejectionEvent
+        if emitNqxJson and rejectionScenarioValid
+            eventMessage := f_rejectionJson(rejectionDir == 1 ? "LONG" : "SHORT", ctScore, rejectionOeActive)
+        else if enableEventAlerts
+            eventMessage := "NQX SwingArm: CONFIRMED_REJECTION " + (rejectionDir == 1 ? "LONG" : "SHORT") + " · " + (rejectionScenarioValid ? "WATCH" : "NO TRADE · " + rejectionNoTradeReason) + " · SCORE " + str.tostring(ctScore) + "/100"
+    else if enableEventAlerts and externalTargetReachedEvent
+        eventMessage := "NQX SwingArm: TARGET REACHED · " + externalTargetKey
+    else if enableEventAlerts and anyFreshZoneEvent
+        eventMessage := "NQX SwingArm: CONFIRMED FLIP · prior arm invalidated · fresh geometry created"
+    else if enableEventAlerts and optimalEntryEvent
+        eventMessage := "NQX SwingArm: OPTIMAL ENTRY STATE · WATCH · SCORE " + str.tostring(ctScore) + "/100"
+    else if enableEventAlerts and anyConsumedEvent
+        eventMessage := "NQX SwingArm: FROZEN ZONE CONSUMED · NO TRADE"
+    else if enableEventAlerts and anyTouchEvent
+        eventMessage := "NQX SwingArm: CONFIRMED FIB TOUCH · WATCH · not an entry signal"
+    else if enableEventAlerts and structureChangeEvent
+        eventMessage := "NQX SwingArm: STRUCTURE CHANGE · " + (ctStructureState == 1 ? "BULL" : ctStructureState == -1 ? "BEAR" : "NEUTRAL")
+    if str.length(eventMessage) > 0
+        alert(eventMessage, alert.freq_once_per_bar_close)
+
+// Compact state table. Color denotes state; numbers remain the primary truth.
+var table statusTable = table.new(position.top_right, 5, 6, bgcolor = color.new(color.rgb(22, 26, 34), 12), frame_color = color.new(color.white, 72), frame_width = 1, border_color = color.new(color.white, 84), border_width = 1)
+if barstate.isfirst
+    table.merge_cells(statusTable, 0, 4, 4, 4)
+    table.merge_cells(statusTable, 0, 5, 4, 5)
+
+if barstate.islast
+    if showStatusTable
+        float ctDistanceAtr = f_distanceAtr(ctCommittedClose, ctF1, ctTrail, ctAtr)
+        float h1DistanceAtr = f_distanceAtr(h1EngineClose, h1F1, h1Trail, h1Atr)
+        float h2DistanceAtr = f_distanceAtr(h2EngineClose, h2F1, h2Trail, h2Atr)
+        color headerBg = color.rgb(48, 55, 70)
+        color ctRowBg = not ctReady ? color.new(color.gray, 72) : color.new(ctHighPressure ? (ctTrend == 1 ? HIGH_BULL : HIGH_BEAR) : (ctTrend == 1 ? BULL_FILL : BEAR_FILL), 54)
+        color h1RowBg = not h1Ready ? color.new(color.gray, 72) : color.new(h1HighPressure ? (h1Trend == 1 ? HIGH_BULL : HIGH_BEAR) : (h1Trend == 1 ? BULL_FILL : BEAR_FILL), 62)
+        color h2RowBg = not h2Ready ? color.new(color.gray, 72) : color.new(h2HighPressure ? (h2Trend == 1 ? HIGH_BULL : HIGH_BEAR) : (h2Trend == 1 ? BULL_FILL : BEAR_FILL), 70)
+        table.cell(statusTable, 0, 0, "TF", text_color = color.white, bgcolor = headerBg, text_size = size.tiny)
+        table.cell(statusTable, 1, 0, "STATE", text_color = color.white, bgcolor = headerBg, text_size = size.tiny)
+        table.cell(statusTable, 2, 0, "SCORE", text_color = color.white, bgcolor = headerBg, text_size = size.tiny)
+        table.cell(statusTable, 3, 0, "TRAIL", text_color = color.white, bgcolor = headerBg, text_size = size.tiny)
+        table.cell(statusTable, 4, 0, "DIST/ATR", text_color = color.white, bgcolor = headerBg, text_size = size.tiny)
+
+        table.cell(statusTable, 0, 1, f_tfText(ltf), text_color = color.white, bgcolor = h1RowBg, text_size = size.tiny)
+        table.cell(statusTable, 1, 1, f_stateText(h1Ready, h1HighPressure, h1Trend), text_color = color.white, bgcolor = h1RowBg, text_size = size.tiny)
+        table.cell(statusTable, 2, 1, str.tostring(h1Score) + "/100", text_color = color.white, bgcolor = h1RowBg, text_size = size.tiny)
+        table.cell(statusTable, 3, 1, h1Ready ? str.tostring(h1Trail, format.mintick) : "—", text_color = color.white, bgcolor = h1RowBg, text_size = size.tiny)
+        table.cell(statusTable, 4, 1, na(h1DistanceAtr) ? "—" : str.tostring(h1DistanceAtr, "#.00"), text_color = color.white, bgcolor = h1RowBg, text_size = size.tiny)
+
+        table.cell(statusTable, 0, 2, f_tfText(timeframe.period), text_color = color.white, bgcolor = ctRowBg, text_size = size.tiny)
+        table.cell(statusTable, 1, 2, f_stateText(ctReady, ctHighPressure, ctTrend), text_color = color.white, bgcolor = ctRowBg, text_size = size.tiny)
+        table.cell(statusTable, 2, 2, str.tostring(ctCommittedScore) + "/100", text_color = color.white, bgcolor = ctRowBg, text_size = size.tiny)
+        table.cell(statusTable, 3, 2, ctReady ? str.tostring(ctTrail, format.mintick) : "—", text_color = color.white, bgcolor = ctRowBg, text_size = size.tiny)
+        table.cell(statusTable, 4, 2, na(ctDistanceAtr) ? "—" : str.tostring(ctDistanceAtr, "#.00"), text_color = color.white, bgcolor = ctRowBg, text_size = size.tiny)
+
+        table.cell(statusTable, 0, 3, f_tfText(htf), text_color = color.white, bgcolor = h2RowBg, text_size = size.tiny)
+        table.cell(statusTable, 1, 3, f_stateText(h2Ready, h2HighPressure, h2Trend), text_color = color.white, bgcolor = h2RowBg, text_size = size.tiny)
+        table.cell(statusTable, 2, 3, str.tostring(h2Score) + "/100", text_color = color.white, bgcolor = h2RowBg, text_size = size.tiny)
+        table.cell(statusTable, 3, 3, h2Ready ? str.tostring(h2Trail, format.mintick) : "—", text_color = color.white, bgcolor = h2RowBg, text_size = size.tiny)
+        table.cell(statusTable, 4, 3, na(h2DistanceAtr) ? "—" : str.tostring(h2DistanceAtr, "#.00"), text_color = color.white, bgcolor = h2RowBg, text_size = size.tiny)
+        string frozenCountText = "FZ " + str.tostring(array.size(ltfFrozenZones)) + "/" + str.tostring(array.size(ctFrozenZones)) + "/" + str.tostring(array.size(htfFrozenZones))
+        string consumedCountText = "USED " + str.tostring(f_countFrozenState(ltfFrozenZones, "CONSUMED")) + "/" + str.tostring(f_countFrozenState(ctFrozenZones, "CONSUMED")) + "/" + str.tostring(f_countFrozenState(htfFrozenZones, "CONSUMED"))
+        table.cell(statusTable, 0, 4, frozenCountText + " · " + consumedCountText + " · SCORE IS NOT PROBABILITY", text_color = color.silver, bgcolor = color.rgb(31, 36, 48), text_size = size.tiny)
+        string riskStatus = not ctReady or not h2Ready ? "MISSING · NO TRADE" : htfDataStale ? "STALE HTF · NO TRADE" : not baseRiskOrderValid ? "INVALIDATED GEOMETRY · NO TRADE" : not externalTargetActive ? "NO TARGET · NO TRADE" : not fullRiskOrderValid ? "INVALID TARGET ORDER · NO TRADE" : "WATCH · R:R " + str.tostring(riskReward, "#.00") + " · STOP " + str.tostring(riskHardStop, format.mintick) + " · TGT " + str.tostring(riskTargetPrice, format.mintick)
+        color riskStatusColor = fullRiskOrderValid and not htfDataStale ? color.white : color.rgb(255, 193, 7)
+        table.cell(statusTable, 0, 5, riskStatus, text_color = riskStatusColor, bgcolor = color.rgb(22, 26, 34), text_size = size.tiny)
+    else
+        table.clear(statusTable, 0, 0, 4, 5)
+
+plot(showExtremes and ctVisible ? ctExtreme : na, "CT Extremum", color = ctTrend == 1 ? color.lime : color.fuchsia, linewidth = 2, style = plot.style_circles)
+plot(showExtremes and h1Visible ? h1Extreme : na, "LTF Extremum", color = h1Trend == 1 ? color.lime : color.fuchsia, linewidth = 2, style = plot.style_circles)
+plot(showExtremes and h2Visible ? h2Extreme : na, "HTF Extremum", color = h2Trend == 1 ? color.lime : color.fuchsia, linewidth = 2, style = plot.style_circles)
+
+// Data Window contract for geometry QA. No values below are probabilities.
+plot(ctAtr, "NQX_DATA_CT_ATR", display = display.data_window)
+plot(ctTrend, "NQX_DATA_CT_TREND", display = display.data_window)
+plot(ctArmId, "NQX_DATA_CT_ARM_ID", display = display.data_window)
+plot(ctFlip ? 1 : 0, "NQX_DATA_CT_FLIP", display = display.data_window)
+plot(ctCommittedScore, "NQX_DATA_CT_SCORE_NOT_PROBABILITY", display = display.data_window)
+plot(ctHighPressure ? 1 : 0, "NQX_DATA_CT_HIGH_PRESSURE_CONFIRMED", display = display.data_window)
+plot(ctTouch3 ? 3 : ctTouch2 ? 2 : ctTouch1 ? 1 : 0, "NQX_DATA_CT_CONFIRMED_TOUCH_LEVEL", display = display.data_window)
+plot(h1Trend, "NQX_DATA_LTF_TREND", display = display.data_window)
+plot(h1SourceTime, "NQX_DATA_LTF_SOURCE_TIME", display = display.data_window)
+plot(h1Score, "NQX_DATA_LTF_SCORE_NOT_PROBABILITY", display = display.data_window)
+plot(h1HighPressure ? 1 : 0, "NQX_DATA_LTF_HIGH_PRESSURE_CONFIRMED", display = display.data_window)
+plot(h1NewConfirmedSource ? (h1Touch3 ? 3 : h1Touch2 ? 2 : h1Touch1 ? 1 : 0) : 0, "NQX_DATA_LTF_CONFIRMED_TOUCH_LEVEL", display = display.data_window)
+plot(h2Trend, "NQX_DATA_HTF_TREND_CONFIRMED", display = display.data_window)
+plot(h2SourceTime, "NQX_DATA_HTF_SOURCE_TIME", display = display.data_window)
+plot(h2Score, "NQX_DATA_HTF_SCORE_NOT_PROBABILITY", display = display.data_window)
+plot(h2HighPressure ? 1 : 0, "NQX_DATA_HTF_HIGH_PRESSURE_CONFIRMED", display = display.data_window)
+plot(h2NewConfirmedSource ? (h2Touch3 ? 3 : h2Touch2 ? 2 : h2Touch1 ? 1 : 0) : 0, "NQX_DATA_HTF_CONFIRMED_TOUCH_LEVEL", display = display.data_window)
+plot(array.size(ltfFrozenZones), "NQX_DATA_LTF_FROZEN_COUNT", display = display.data_window)
+plot(array.size(ctFrozenZones), "NQX_DATA_CT_FROZEN_COUNT", display = display.data_window)
+plot(array.size(htfFrozenZones), "NQX_DATA_HTF_FROZEN_COUNT", display = display.data_window)
+plot(externalTargetActive ? externalTargetTop : na, "NQX_DATA_EXTERNAL_TARGET_TOP", display = display.data_window)
+plot(externalTargetActive ? externalTargetBottom : na, "NQX_DATA_EXTERNAL_TARGET_BOTTOM", display = display.data_window)
+plot(baseRiskOrderValid ? riskInvalidation : na, "NQX_DATA_RISK_INVALIDATION", display = display.data_window)
+plot(baseRiskOrderValid ? riskHardStop : na, "NQX_DATA_RISK_HARD_STOP", display = display.data_window)
+plot(fullRiskOrderValid ? riskReward : na, "NQX_DATA_RISK_REWARD", display = display.data_window)
+plot(htfDataStale ? 1 : 0, "NQX_DATA_HTF_STALE", display = display.data_window)
+plot(confirmedRejectionEvent ? rejectionDir : 0, "NQX_DATA_CONFIRMED_REJECTION", display = display.data_window)
