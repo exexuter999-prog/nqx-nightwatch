@@ -25,8 +25,8 @@
 
 | | LTA-A | LTA-B |
 |---|---|---|
-| 口座名 | `LTATANOBA1001064330885` | `LTATANOBA1005923156221` |
-| accountId | 63077661 | 63077660 |
+| 口座名 | `LTATANOBA1000000000001` | `LTATANOBA1000000000002` |
+| accountId | 90000001 | 90000002 |
 | 利益目標 | $6,000 | $6,000 |
 | 最大損失 | $3,000（**EOD トレーリング**） | $3,000（同） |
 | 一貫性ルール | 無し | 無し |
@@ -48,8 +48,8 @@ R40で通常2枚固定の2口座ミラー経路を開通した。ENTRYは1 claim
 ```powershell
 cd "C:\Users\exexu\Downloads\nq-nightwatch-claude-code-handoff"
 python broker_status.py --accounts      # ★ 口座が消えていないか
-python broker_status.py --account LTATANOBA1001064330885 --json
-python broker_status.py --account LTATANOBA1005923156221 --json
+python broker_status.py --account LTATANOBA1000000000001 --json
+python broker_status.py --account LTATANOBA1000000000002 --json
 python order.py --status
 python events.py --refresh
 ```
@@ -64,7 +64,7 @@ EOD ドローダウンは終値で上へ切り上がる。`LIFELINE_*` は**ブ�
 コードにトレーリングの実装も無い**ので、毎日その日の終値から手で書き換える。
 
 ```
-LIFELINE_LTATANOBA1001064330885=<新しい残機>
+LIFELINE_LTATANOBA1000000000001=<新しい残機>
 ```
 
 更新漏れ = 残機の誤認。可変枚数（Phase 3）を入れた後は、そのままサイズ誤りになる。

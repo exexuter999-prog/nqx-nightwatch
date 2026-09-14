@@ -5,6 +5,8 @@
     python setup_cloudflare.py            # 1〜4 を通しで実行
     python setup_cloudflare.py --check    # 前提だけ確認して何もしない
     python setup_cloudflare.py --skip-keyboard   # Telegram への貼り直しをしない
+    python setup_cloudflare.py --sync-secrets    # NQX_ALLOWED_USER_ID / NQX_AUTOTRADE_ACCOUNTS の
+                                                 # secret だけを .secrets の値から投入(deploy しない)
 
 ## 前提
 
@@ -46,6 +48,10 @@ MINI_APP_DIR = os.path.join(BASE, "telegram_mini_app")
 WRANGLER = os.path.join(CLOUDFLARE_DIR, "node_modules", "wrangler", "bin", "wrangler.js")
 CLOUD_ENV = os.path.join(BASE, ".secrets", "nqx_cloud.env")
 TELEGRAM_ENV = os.path.join(BASE, ".secrets", "telegram.env")
+CROSSTRADE_ENV = os.path.join(BASE, ".secrets", "crosstrade.env")
+# 2026-09-15: 個人・口座の識別子は wrangler.toml の [vars] ではなく secret で持つ(リポジトリ公開のため)。
+# Worker は env.<名前> で読むだけなので var でも secret でも動くが、同じ名前を両方に置くことはできない。
+IDENTITY_SECRETS = ("NQX_ALLOWED_USER_ID", "NQX_AUTOTRADE_ACCOUNTS")
 PAGES_PROJECT = "nqx-nightwatch"
 
 for _stream in ("stdout", "stderr"):
@@ -103,11 +109,19 @@ def check_prerequisites():
             if not telegram.get(key):
                 problems.append(f"{TELEGRAM_ENV} に {key} がありません")
 
+    if not os.path.exists(CROSSTRADE_ENV):
+        problems.append(f"{CROSSTRADE_ENV} がありません(NQX_AUTOTRADE_ACCOUNTS の元値)")
+    elif not read_env(CROSSTRADE_ENV).get("CROSSTRADE_ACCOUNTS"):
+        problems.append(f"{CROSSTRADE_ENV} に CROSSTRADE_ACCOUNTS がありません")
+
+    # 識別子が [vars] に戻っていないことを確かめる。secret と同名の var があると
+    # `wrangler secret put` が衝突して失敗し、そのうえ ID がリポジトリに載る。
     toml_path = os.path.join(CLOUDFLARE_DIR, "wrangler.toml")
     toml = open(toml_path, encoding="utf-8").read() if os.path.exists(toml_path) else ""
-    match = re.search(r'^NQX_ALLOWED_USER_ID\s*=\s*"([^"]*)"', toml, re.M)
-    if not match or not match.group(1):
-        problems.append("wrangler.toml の NQX_ALLOWED_USER_ID が空です")
+    for name in IDENTITY_SECRETS:
+        if re.search(r"^\s*" + re.escape(name) + r"\s*=", toml, re.M):
+            problems.append(f"wrangler.toml に {name} が [vars] として残っています。"
+                            "secret へ移したので行を消してください(2026-09-15)")
 
     code, out = wrangler(["whoami"], timeout=180)
     authed = "You are not authenticated" not in out
@@ -158,6 +172,28 @@ def put_secret(name, value):
         raise SystemExit(f"ERROR: secret {name} の投入に失敗しました")
 
 
+def sync_identity_secrets(telegram=None):
+    """NQX_ALLOWED_USER_ID / NQX_AUTOTRADE_ACCOUNTS を .secrets の値から secret へ投入する。
+
+    元値は Telegram の TELEGRAM_CHAT_ID(1 対 1 チャットでは user id と同じ)と
+    crosstrade.env の CROSSTRADE_ACCOUNTS。Worker 側の口座集合はローカルと**必ず同じ**で
+    なければ autotrade_arm が武装を自動失効させる(2026-08-27 実測)ので、口座を入れ替えたら
+    crosstrade.env を直した直後にこれを叩く。値は表示しない。deploy は要らない
+    (secret の投入だけで新しい version が出る)。
+    """
+    telegram = telegram if telegram is not None else read_env(TELEGRAM_ENV)
+    crosstrade = read_env(CROSSTRADE_ENV)
+    user_id = (telegram.get("TELEGRAM_CHAT_ID") or "").strip()
+    accounts = ",".join(a.strip() for a in (crosstrade.get("CROSSTRADE_ACCOUNTS") or "").split(",") if a.strip())
+    if not user_id:
+        raise SystemExit(f"ERROR: {TELEGRAM_ENV} に TELEGRAM_CHAT_ID がありません")
+    if not accounts:
+        raise SystemExit(f"ERROR: {CROSSTRADE_ENV} に CROSSTRADE_ACCOUNTS がありません")
+    put_secret("NQX_ALLOWED_USER_ID", user_id)
+    put_secret("NQX_AUTOTRADE_ACCOUNTS", accounts)
+    say(2, f"識別子 secret を投入しました(口座 {len(accounts.split(','))} 件。値は表示しません)")
+
+
 def configure(worker_url):
     say(2, "secret を投入し、.secrets/nqx_cloud.env を作ります")
     telegram = read_env(TELEGRAM_ENV)
@@ -174,6 +210,7 @@ def configure(worker_url):
     put_secret("NQX_PUBLISH_SECRET", publish_secret)
     put_secret("NQX_LAUNCH_SECRET", launch_secret)
     put_secret("TELEGRAM_BOT_TOKEN", telegram["TELEGRAM_TOKEN"])
+    sync_identity_secrets(telegram)
     say(2, f"secret を投入しました(既存: {sorted(already) or 'なし'})")
 
     os.makedirs(os.path.dirname(CLOUD_ENV), exist_ok=True)
@@ -349,6 +386,8 @@ def main():
     parser = argparse.ArgumentParser(description="Cloudflare 一括セットアップ")
     parser.add_argument("--check", action="store_true", help="前提の確認だけ行う")
     parser.add_argument("--skip-keyboard", action="store_true", help="Telegram への貼り直しをしない")
+    parser.add_argument("--sync-secrets", action="store_true",
+                        help="NQX_ALLOWED_USER_ID / NQX_AUTOTRADE_ACCOUNTS の secret だけを投入して終わる")
     args = parser.parse_args()
 
     problems, authed = check_prerequisites()
@@ -361,6 +400,9 @@ def main():
         return 1
     say(0, "前提 OK(wrangler 認証済み)")
     if args.check:
+        return 0
+    if args.sync_secrets:
+        sync_identity_secrets()
         return 0
 
     worker_url = deploy_worker()

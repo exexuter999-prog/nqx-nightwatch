@@ -442,22 +442,31 @@ npm install
 npx wrangler login
 ```
 
-`wrangler.toml` の `[vars]` を埋める。
+`wrangler.toml` の `[vars]` を埋める(秘密でも個人識別子でもない値だけ)。
 
 ```toml
 NQX_ACCOUNT_ID = "lucid-50k-daily"
 NQX_SYMBOL = "MNQU6"
-NQX_ALLOWED_USER_ID = "<Telegram の数値 user id>"
 NQX_ALLOWED_ORIGIN = "https://nqx-nightwatch.pages.dev"
 ```
 
-秘密を投入する(`wrangler.toml` には書かない)。
+秘密と識別子を投入する(`wrangler.toml` には書かない)。`NQX_ALLOWED_USER_ID`(Telegram の数値
+user id)と `NQX_AUTOTRADE_ACCOUNTS`(CrossTrade 口座 ID の CSV。ローカル `CROSSTRADE_ACCOUNTS` と
+**必ず同じ集合**)は 2026-09-15 に `[vars]` から secret へ移した。Worker のコードは `env.<名前>` で読むだけ
+なので var と secret のどちらでも動く。`python setup_cloudflare.py --sync-secrets` が
+`.secrets/telegram.env` と `.secrets/crosstrade.env` から 2 つを投入する。
 
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put NQX_PUBLISH_SECRET
 npx wrangler secret put NQX_LAUNCH_SECRET
+npx wrangler secret put NQX_ALLOWED_USER_ID
+npx wrangler secret put NQX_AUTOTRADE_ACCOUNTS
 ```
+
+ローカルの `wrangler dev` 用の値は `cloudflare/.dev.vars`(git 管理外)に置く。
+口座を入れ替えたときは `crosstrade.env` を直してから `--sync-secrets` を叩く(deploy は不要。
+secret の投入だけで新しい version が出る)。
 
 `NQX_PUBLISH_SECRET` と `NQX_LAUNCH_SECRET` は別々の値にする。生成例:
 

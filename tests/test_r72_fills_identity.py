@@ -18,7 +18,7 @@ import route_identity  # noqa: E402
 
 PASS = [0]
 FAIL = [0]
-ACC = "LFF05062316710006"
+ACC = "LFF00000000000006"
 SYM = "MNQU6"
 
 

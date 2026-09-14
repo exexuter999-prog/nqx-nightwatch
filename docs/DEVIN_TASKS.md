@@ -33,15 +33,35 @@ git status --short | Select-String "secrets"   # 何も出ないことを確認�
 git commit -m "Initial import for Devin (secrets excluded)"
 ```
 
-注意(push 前に決めること):
-- **口座 ID**(LFF…, LFE…, LTA…)が 31 ファイルに書いてある(`CLAUDE.md` / `TRADING_CONTEXT.md` /
-  `WEEK_PLAN.md` / `cloudflare/wrangler.toml` / tests と Worker テストの固定データなど)。API キーでは
-  ないので発注はできない。外に出したくなければ push 前に置換する(tests 内は固定データなので
-  置換しても壊れないが、R92 の gitleaks allowlist と整合させる)。
-- `cloudflare/wrangler.toml` の `NQX_ALLOWED_USER_ID` は Telegram の数値ユーザー ID。秘密ではないが
-  個人識別子なので、気になるなら push 前に `vars` から外して `wrangler secret` 側へ寄せる
-  (Worker のコード変更と deploy が要る)。
+2026-09-15 ユーザー決定で push 前に次を済ませた:
+- **口座 ID は全部伏せ字に置換済み**(CrossTrade 口座名は `LFF00000000000006` のように接頭辞と桁数を
+  保った 0 埋め、Tradovate の数値 accountId は `9000xxxx`)。対応表は `TRADING_CONTEXT.md` 冒頭。
+  実 ID の正本は `.secrets/crosstrade.env`。**Devin は伏せ字しか見ない**ので、tests の固定データも
+  伏せ字のままで動く。R92 の gitleaks カスタムルールは「実 ID の形」= `LF[EF]0[1-9]\d{12}` /
+  `LTATANOBA10[1-9]\d{11}` / `6\d{7}`(accountId)を検出対象にし、0 埋めの伏せ字は当たらないようにする。
+- `cloudflare/wrangler.toml` の `NQX_ALLOWED_USER_ID`(Telegram 数値 user id)と `NQX_AUTOTRADE_ACCOUNTS`
+  (口座 CSV)は `[vars]` から **wrangler secret へ移した**。Worker のコードは `env.<名前>` で読むだけなので
+  無変更。投入は `python setup_cloudflare.py --sync-secrets`、ローカル dev 用は `cloudflare/.dev.vars`
+  (git 管理外)。**deploy と secret 投入は運用者**(手順は §0.4)。
 - `grep` 済み: API キー本体・bot token・`sk_` 系トークンは追跡対象に無い(2026-09-15 確認)。
+
+### 0.4 Worker 側の secret 移行(【人】1 回だけ。2026-09-15 時点で未実施)
+
+同じ名前を var と secret の両方に置けないので、**deploy(var を外す)→ secret 投入**の順になる。
+その間(数十秒)は Worker の認証が `NQX_ALLOWED_USER_ID is not configured` で 500 を返すので、
+監視窓の外(JST 05:45〜07:00)か建玉が無いときに、次を続けて叩く(PowerShell 5.1):
+
+```powershell
+cd "C:\Users\exexu\Downloads\nq-nightwatch-claude-code-handoff\cloudflare"
+npx wrangler deploy
+cd ..
+python setup_cloudflare.py --sync-secrets
+python nqx_state.py --check
+```
+
+`--sync-secrets` は `.secrets/telegram.env` の `TELEGRAM_CHAT_ID` と `.secrets/crosstrade.env` の
+`CROSSTRADE_ACCOUNTS` を投入する(値は表示しない)。以後、口座を入れ替えたときの Worker 側の作業は
+`wrangler.toml` の編集 + deploy ではなく **`--sync-secrets` 1 回**になる。
 
 ### 0.2 Devin の Knowledge に §1 を貼る
 

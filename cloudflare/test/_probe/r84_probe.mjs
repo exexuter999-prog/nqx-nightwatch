@@ -1,7 +1,7 @@
 import { applyEvent, emptyState, projectState, strategyEvidenceHash, entryKeyForTuple } from "../../src/state_machine.js";
 const T0 = Date.parse("2026-09-12T02:12:00Z");
 const iso = (ms = T0) => new Date(ms).toISOString();
-const ACC = "LFF05062316710006";
+const ACC = "LFF00000000000006";
 function frozenEvidence() {
   const raw = { version: "R14-STRATEGY-EVIDENCE-1", asOf: iso(), sessionId: "NY-R84",
     source: "fixture", provenance: "test", models: { ifvg: { valid: false } } };

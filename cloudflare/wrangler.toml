@@ -4,30 +4,26 @@ compatibility_date = "2026-08-01"
 workers_dev = true
 
 # --- 秘密でない設定 ---------------------------------------------------------
-# 秘密は wrangler secret put で入れる。ここには絶対に書かない。
+# 秘密と個人・口座の識別子は wrangler secret put で入れる。ここには絶対に書かない。
 #   wrangler secret put TELEGRAM_BOT_TOKEN
 #   wrangler secret put NQX_PUBLISH_SECRET
 #   wrangler secret put NQX_LAUNCH_SECRET
+#   wrangler secret put NQX_ALLOWED_USER_ID       # Telegram の数値 user id(2026-09-15 に vars から移動)
+#   wrangler secret put NQX_AUTOTRADE_ACCOUNTS    # CrossTrade 口座 ID の CSV(同上)
+# 後ろ 2 つは `python setup_cloudflare.py --sync-secrets` が .secrets/telegram.env と
+# .secrets/crosstrade.env から投入する。ローカル `wrangler dev` 用の値は cloudflare/.dev.vars
+# (git 管理外)に置く。
+#
+# NQX_AUTOTRADE_ACCOUNTS はローカルの CROSSTRADE_ACCOUNTS と**必ず同じ集合**にする。ズレると
+# autotrade_arm が "account scope changed since arming" で武装を自動失効させ、Mini App で AUTO を
+# 何度 ON にしても新規 ENTRY が出ない(2026-08-27 実測)。
+#   ★ .secrets/crosstrade.env の CROSSTRADE_ACCOUNTS を動かしたら**同時に** --sync-secrets を叩く。
+#     secret だけ古いと上の警告どおり AUTO が永久に武装できない。
+# 口座の入替履歴(封印・評価通過)は TRADING_CONTEXT.md §1 に残す。ここには書かない。
 [vars]
 NQX_ACCOUNT_ID = "lucid-50k-daily"
 NQX_SYMBOL = "MNQU6"
-NQX_ALLOWED_USER_ID = "8677235763"                       # Telegram の数値 user id を入れる
 NQX_ALLOWED_ORIGIN = "https://nqx-nightwatch.pages.dev"
-# ローカルの CROSSTRADE_ACCOUNTS と**必ず同じ集合**にする。ズレると
-# autotrade_arm が "account scope changed since arming" で武装を自動失効させ、
-# Mini App で AUTO を何度 ON にしても新規 ENTRY が出ない(2026-08-27 実測)。
-# 2026-08-31: Lucid Flex 25k(LFF02562316710002)を封印し、評価通過後の
-# LucidPro 50K(LTF05062316710005)へ入替。
-# 2026-09-01: LucidPro 50K が残機超過(床 $48,000 を $49.50 割り)で封印。LTA 2口座へ戻す。
-#   #(2026-09-01 封印/残機超過) "LTATANOBA1001064330885,LTATANOBA1005923156221,LTF05062316710005"
-#   ★ .secrets/crosstrade.env の CROSSTRADE_ACCOUNTS を動かしたら**このファイルも同時に**
-#     直して deploy する。ここだけ古いと上の警告どおり AUTO が永久に武装できない。
-# 2026-09-04: LTA 2口座が EOD 床割れ。Lucid Flex 50K 評価(LFE05062316710024)1口座へ入替。
-#   #(2026-09-04 封印/残機超過) "LTATANOBA1001064330885,LTATANOBA1005923156221"
-# 2026-09-08: Lucid Flex 50K 評価通過。CrossTrade 側で LFE05062316710024 が消え、funded 口座
-#   LFF05062316710006(accountId 64968904)へ入替(一貫性ルールなし・ユーザー確認)。
-#   #(2026-09-08 封印/評価通過→funded) "LFE05062316710024"
-NQX_AUTOTRADE_ACCOUNTS = "LFF05062316710006"
 NQX_AUTOTRADE_MINUTES = "420"                            # AUTO ON から7時間
 NQX_AUTOTRADE_MAX_MINUTES = "720"                        # 連続武装の絶対上限
 

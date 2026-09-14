@@ -41,8 +41,8 @@ function healthyView(extra = {}) {
       },
     },
     cycleHealth: { status: "PUBLISHED", at: iso(-30_000), publishedAt: iso(-30_000), reason: null, kill: false },
-    autotradeArm: { enabled: true, autotrade: true, live: true, expiresAt: iso(6 * 3_600_000), accountScope: ["LFE05062316710024"], symbol: "MNQU6" },
-    accounts: { observedAt: iso(-30_000), totalBuffer: 2396, list: [{ id: "LFE05062316710024", label: "…0024", buffer: 2396 }],
+    autotradeArm: { enabled: true, autotrade: true, live: true, expiresAt: iso(6 * 3_600_000), accountScope: ["LFE00000000000024"], symbol: "MNQU6" },
+    accounts: { observedAt: iso(-30_000), totalBuffer: 2396, list: [{ id: "LFE00000000000024", label: "…0024", buffer: 2396 }],
       sync: { verified: true, missing: [], unknown: [], dead: [] } },
     display: { orderable: false, blockReason: "NO ACTIVE SCENARIO", cyclePaired: false },
     ...extra,
@@ -162,14 +162,14 @@ test("AUTO の期限・OFF・ブローカー未確認・口座消失を一つず
   assert.equal(byId(aging, "broker").word, "AGING");
 
   const gone = healthyView();
-  gone.accounts.sync = { verified: true, missing: ["LTATANOBA1001064330885"], unknown: [], dead: [] };
+  gone.accounts.sync = { verified: true, missing: ["LTATANOBA1000000000001"], unknown: [], dead: [] };
   const g = deriveRoute(gone, LIVE, NOW);
   assert.equal(byId(g, "accounts").state, "DOWN");
-  assert.match(byId(g, "accounts").detail, /…330885/);
+  assert.match(byId(g, "accounts").detail, /…000001/);
   assert.match(byId(g, "accounts").detail, /do not send/i);
 
   const fresh = healthyView();
-  fresh.accounts.sync = { verified: true, missing: [], unknown: ["LTATANOBA1005923156221"], dead: [] };
+  fresh.accounts.sync = { verified: true, missing: [], unknown: ["LTATANOBA1000000000002"], dead: [] };
   assert.equal(byId(deriveRoute(fresh, LIVE, NOW), "accounts").state, "WARN");
 });
 

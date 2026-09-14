@@ -9,7 +9,7 @@ import executionContract from "../../execution_contract.json" with { type: "json
 
 function intent(qty) {
   return {
-    version: executionContract.management.version, accountId: "LFE05062316710024", symbol: "MNQU6",
+    version: executionContract.management.version, accountId: "LFE00000000000024", symbol: "MNQU6",
     positionGeneration: "PG:1:POS:" + "a".repeat(64), action: "MODIFY", side: "SELL", qty,
     stop: "29556.75", target: "29350.75", executionContractVersion: executionContract.version,
   };

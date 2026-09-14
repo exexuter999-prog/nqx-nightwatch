@@ -22,7 +22,7 @@ def check(label, condition, detail=""):
     print(f"OK   {label}")
 
 
-ACC = "LFF05062316710006"
+ACC = "LFF00000000000006"
 
 
 def plan(qty, owned=False, tag="p"):

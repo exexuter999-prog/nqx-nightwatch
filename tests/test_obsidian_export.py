@@ -36,12 +36,12 @@ def write_jsonl(path, rows):
 
 SCORE = [
     {"resultId": "rs_aaaaaa111111", "closedAt": "2026-09-04T19:55:00.112000+00:00",
-     "model": "UNATTRIBUTED", "grade": "A+", "scenarioId": "scn1", "accountId": "LFE05062316710024",
+     "model": "UNATTRIBUTED", "grade": "A+", "scenarioId": "scn1", "accountId": "LFE00000000000024",
      "mode": "LIVE", "side": "SHORT", "qty": 20, "entry": 29570.5, "exit": 29582.75,
      "stop": 29580.25, "pointValue": 2.0, "fees": None, "pnlGross": -490.0, "pnlNet": -490.0,
      "rMultiple": -1.256, "outcome": "LOSS", "evidenceTags": ["CVD_ALIGNED", "VP_ACCEPTED"]},
     {"resultId": "rs_bbbbbb222222", "closedAt": "2026-09-04T19:26:58.738000+00:00",
-     "model": "UNATTRIBUTED", "grade": None, "scenarioId": None, "accountId": "LFE05062316710024",
+     "model": "UNATTRIBUTED", "grade": None, "scenarioId": None, "accountId": "LFE00000000000024",
      "mode": "LIVE", "side": "SHORT", "qty": 6, "entry": 29523.5, "exit": 29521.75, "stop": None,
      "pointValue": 2.0, "fees": None, "pnlGross": 21.0, "pnlNet": 21.0, "rMultiple": None,
      "outcome": "FLAT", "evidenceTags": []},
@@ -52,7 +52,7 @@ LEDGER = [
         "entryOrderType": "MARKET", "entryReference": 29569.25, "initialStop": 29580.25,
         "tp1": 29535.0, "finalTarget": 29350.75, "qty": 20, "riskDollars": 440.0,
         "riskCapSource": "ACCOUNT_DRAWDOWN_BUFFER", "decisionEvidence": ["CVD_ALIGNED"],
-        "accountScope": ["LFE05062316710024"],
+        "accountScope": ["LFE00000000000024"],
         "legs": [{"id": "TP1", "qty": 10, "target": 29535.0}, {"id": "RUNNER", "qty": 10, "target": 29350.75}]}},
 ]
 
@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("経路 auto / MARKET / ULTRA / 滑り",
           "route: auto" in text and "entry_type: MARKET" in text and "ultra: true" in text
           and "slippage_pt: 1.25" in text, text[:600])
-    check("口座 ID はマスク", "LFE…0024" in text and "LFE05062316710024" not in text)
+    check("口座 ID はマスク", "LFE…0024" in text and "LFE00000000000024" not in text)
     check("損益・R・結果", "pnl_net: -490.0" in text and "r_multiple: -1.256" in text and "outcome: LOSS" in text)
     tags_line = next((l for l in text.splitlines() if l.startswith("tags: ")), "")
     check("tags に model/outcome/route/grade/exit", all(x in tags_line for x in ("model/VP80_REVERSION", "outcome/LOSS", "route/auto", "grade/Aplus", "exit/SL")), tags_line)
@@ -150,7 +150,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("足が無ければ『chart unavailable』の SVG(落ちない)", "chart unavailable" in nb_svg and len(res_nb["created"]) == 2)
     check("dry-run は書かない", not os.path.exists(os.path.join(tmp, "empty", "Trades")) and len(dry["created"]) == 2)
 
-check("mask_account", ox.mask_account("LFE05062316710024") == "LFE…0024" and ox.mask_account("ACC") == "ACC")
+check("mask_account", ox.mask_account("LFE00000000000024") == "LFE…0024" and ox.mask_account("ACC") == "ACC")
 
 # scenarioId の無い決済(fills 経由)は、直前 60 分の同方向・同枚数プランが 1 つだけなら属性を引く
 with tempfile.TemporaryDirectory() as tmp:
@@ -158,10 +158,10 @@ with tempfile.TemporaryDirectory() as tmp:
     write_jsonl(ledger, [
         {"time": "2026-09-04T19:27:30+00:00", "status": "ENTRY_CLAIMED", "plan": {
             "scenarioId": "scn28", "model": "BREAKER_CONTINUATION", "grade": "A+", "side": "SELL", "qty": 28,
-            "entryOrderType": "MARKET", "entryReference": 29526.75, "accountScope": ["LFE05062316710024"]}},
+            "entryOrderType": "MARKET", "entryReference": 29526.75, "accountScope": ["LFE00000000000024"]}},
         {"time": "2026-09-04T14:57:00+00:00", "status": "ENTRY_CLAIMED", "plan": {
             "scenarioId": "scn6", "model": "VP80_REVERSION", "grade": "A", "side": "SELL", "qty": 6,
-            "entryOrderType": "LIMIT", "accountScope": ["LFE05062316710024"]}},
+            "entryOrderType": "LIMIT", "accountScope": ["LFE00000000000024"]}},
     ])
     index = ox.plan_index(ledger)
     row28 = {"resultId": "rs_28", "closedAt": "2026-09-04T19:34:04+00:00", "side": "SHORT", "qty": 28,

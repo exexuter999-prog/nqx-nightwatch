@@ -147,8 +147,8 @@ cd "C:\Users\exexu\Downloads\nq-nightwatch-Codex-handoff"
 python telegram_bot.py --check
 python nqx_state.py --check
 python broker_status.py --accounts
-python broker_status.py --account LTATANOBA1001064330885 --json
-python broker_status.py --account LTATANOBA1005923156221 --json
+python broker_status.py --account LTATANOBA1000000000001 --json
+python broker_status.py --account LTATANOBA1000000000002 --json
 python order.py --status
 python events.py --refresh
 python autotrade_arm.py --status

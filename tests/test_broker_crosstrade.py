@@ -203,8 +203,8 @@ def list_accounts(body, status=200, cfg=None):
 
 
 LIVE_ROWS = [
-    {"accountId": "63077661", "environment": "demo", "name": "LTA_A", "active": True},
-    {"accountId": "63077660", "environment": "demo", "name": "LTA_B", "active": True},
+    {"accountId": "90000001", "environment": "demo", "name": "LTA_A", "active": True},
+    {"accountId": "90000002", "environment": "demo", "name": "LTA_B", "active": True},
     {"name": "GONE", "status": "unknown_account"},
 ]
 
@@ -214,7 +214,7 @@ check("パスは /accounts", req["path"] == "/v1/api/tv/accounts", req["path"])
 check("Bearer トークンを付ける", req["auth"] == "Bearer mock-bearer-token", str(req["auth"]))
 check("3 行を正規化して返す", rows is not None and len(rows) == 3, str(err))
 check("発注先ラベルを name から取る",
-      rows and rows[0]["id"] == "LTA_A" and rows[0]["accountId"] == "63077661", str(rows))
+      rows and rows[0]["id"] == "LTA_A" and rows[0]["accountId"] == "90000001", str(rows))
 check("unknown_account は usable=False",
       rows and rows[2]["usable"] is False, str(rows and rows[2]))
 check("生の行を必ず残す", rows and rows[0]["raw"] == LIVE_ROWS[0], str(rows and rows[0]))

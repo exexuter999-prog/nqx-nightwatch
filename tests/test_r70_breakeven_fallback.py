@@ -44,7 +44,7 @@ def plan(side="BUY"):
 
 def position(side="BUY", qty=1):
     return {"side": "LONG" if side == "BUY" else "SHORT", "qty": qty, "avgEntry": 29590.75,
-            "accountId": "LFF05062316710006", "symbol": "MNQU6",
+            "accountId": "LFF00000000000006", "symbol": "MNQU6",
             "filledAt": FILLED_AT.isoformat()}
 
 

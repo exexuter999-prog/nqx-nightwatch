@@ -52,7 +52,7 @@ def manual_ownership_halt():
 
 PASS = [0]
 FAIL = [0]
-ACC = "LFF05062316710006"
+ACC = "LFF00000000000006"
 SYM = "MNQU6"
 TS = "2026-09-08T10:34:04.758Z"
 ae._read_env_file = lambda: {}   # 本番 .secrets を読まない(hermetic)
@@ -70,7 +70,7 @@ def check(label, condition, detail=""):
 # ---------------------------------------------------------------- ブローカー行(実測の正規化形)
 
 def child(order_id, oco, parent=None, status="WORKING", action="SELL", ts=TS, account=ACC):
-    return {"orderId": str(order_id), "accountId": account, "brokerAccountId": "64968904",
+    return {"orderId": str(order_id), "accountId": account, "brokerAccountId": "90000006",
             "symbol": SYM, "contractId": "4399654", "status": status, "orderType": None,
             "action": action, "qty": None, "fieldsComplete": False, "limitPrice": None,
             "filledPrice": None, "stopPrice": None, "filled": None,
@@ -82,7 +82,7 @@ def child(order_id, oco, parent=None, status="WORKING", action="SELL", ts=TS, ac
 
 def parent(order_id, status="FILLED", action="BUY", ts=TS, account=ACC, order_type=None,
            limit_price=None, qty=None):
-    return {"orderId": str(order_id), "accountId": account, "brokerAccountId": "64968904",
+    return {"orderId": str(order_id), "accountId": account, "brokerAccountId": "90000006",
             "symbol": SYM, "contractId": "4399654", "status": status,
             "orderType": order_type, "action": action, "qty": qty,
             "fieldsComplete": bool(order_type and action and qty),
@@ -295,7 +295,7 @@ SNAPSHOT = [{"accountId": ACC, "legId": "TP1", "state": "ACCEPTED", **ident},
 
 def position(qty=8, avg=29585.875):
     return {"verified": True, "source": "crosstrade-rest", "platform": "TRADOVATE",
-            "account": "64968904", "accountId": ACC, "brokerAccountId": "64968904", "symbol": SYM,
+            "account": "90000006", "accountId": ACC, "brokerAccountId": "90000006", "symbol": SYM,
             "side": "LONG", "qty": qty, "avgEntry": avg, "filledAt": TS, "orderId": "POS-8",
             "receipt": None, "observedAt": "2026-09-08T10:34:05.000Z"}
 

@@ -9,6 +9,9 @@
 
 このファイルは運用契約、`TRADING_CONTEXT.md` は口座・金額・銘柄の正本、
 `order.py` は送信直前の機械ゲートである。古い履歴や手順を推測で復活させない。
+**口座 ID そのものの正本は `.secrets/crosstrade.env` の `CROSSTRADE_ACCOUNTS` /
+`CROSSTRADE_ACCOUNT_ID_*`**(2026-09-15、リポジトリ公開に伴い文書・テスト内の口座 ID は
+`LFF00000000000006` のような 0 埋めの伏せ字に置換した。文書の ID を発注先として使わない)。
 
 ## 1. データ取得
 
@@ -289,7 +292,7 @@ cd "C:\Users\exexu\Downloads\nq-nightwatch-claude-code-handoff"
 python telegram_bot.py --check
 python nqx_state.py --check
 python broker_status.py --accounts
-python broker_status.py --account LFE05062316710024 --json
+python broker_status.py --account <口座ID> --json   # 口座ID は .secrets/crosstrade.env の CROSSTRADE_ACCOUNTS
 python order.py --status
 python events.py --refresh
 python autotrade_arm.py --status

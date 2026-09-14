@@ -21,8 +21,8 @@ Tradovate / CrossTrade の実照会を行い、**照会できなかった場合�
 
 使い方:
     python broker_status.py --check     # どのアダプタが有効かを表示
-    python broker_status.py --account LTATANOBA1001064330885 --json
-    python broker_status.py --account LTATANOBA1005923156221 --json
+    python broker_status.py --account LTATANOBA1000000000001 --json
+    python broker_status.py --account LTATANOBA1000000000002 --json
 """
 import argparse
 import hashlib

@@ -179,11 +179,11 @@ class MarketFeedTests(unittest.TestCase):
         self.assertTrue(any("cycle failed" in note for note in notes))
 
     def test_publish_freezes_two_account_scope_into_server_and_local_handoff(self):
-        accounts = ["LTATANOBA1001064330885", "LTATANOBA1005923156221"]
+        accounts = ["LTATANOBA1000000000001", "LTATANOBA1000000000002"]
         execution_env = {
             "CROSSTRADE_ACCOUNTS": ",".join(accounts),
-            "RISK_LTATANOBA1001064330885": "240",
-            "RISK_LTATANOBA1005923156221": "240",
+            "RISK_LTATANOBA1000000000001": "240",
+            "RISK_LTATANOBA1000000000002": "240",
         }
         proposal = {
             "state": "ARMED", "grade": "A", "side": "SELL", "qty": 2,
@@ -243,8 +243,8 @@ class FixedQtyTests(unittest.TestCase):
     監視側が qty を書き忘れても、アプリ表示と order.py の判定が食い違わないこと。
     """
 
-    ENV = {"CROSSTRADE_ACCOUNTS": "APEX4568750000010",
-           "RISK_APEX4568750000010": "240", "MAX_RISK_DOLLARS": "240"}
+    ENV = {"CROSSTRADE_ACCOUNTS": "APEX0000000000010",
+           "RISK_APEX0000000000010": "240", "MAX_RISK_DOLLARS": "240"}
 
     def test_qty_is_normalized_to_account_rule(self):
         out, notes = monitor_publish.normalize_qty(

@@ -131,13 +131,13 @@ check("CrossTrade-only order truth covers resting -> partial fill -> terminal",
       and truth_states[1]["orderIds"] == ["ENTRY-RUNNER"], truth_states)
 
 trad_payload = {"success": True, "data": [
-    {"id": 701, "accountId": 62838471, "contractId": 9001,
+    {"id": 701, "accountId": 90000110, "contractId": 9001,
      "orderType": "Limit", "ordStatus": "Working", "action": "Sell",
      "orderQty": 1, "price": 20030, "osId": "OCO-TV"},
 ]}
 trad = broker_status.normalize_crosstrade_orders(
     trad_payload, platform="TRADOVATE", account="ACC-R20", symbol="MNQU6",
-    account_aliases=[62838471], contract_ids=[9001])
+    account_aliases=[90000110], contract_ids=[9001])
 check("Tradovate documented data rows require accountId+contractId aliases",
       trad["verified"] and trad["orderIds"] == ["701"], trad)
 for bad in [
@@ -164,12 +164,12 @@ check("other-symbol rows invalidate the whole broker view", other_symbol_rejecte
 
 adapter = broker_status.CrossTradeAdapter({
     "CROSSTRADE_KEY": "stub", "CROSSTRADE_ACCOUNT": "ACC-R20",
-    "CROSSTRADE_ACCOUNT_ID": "62838471", "CROSSTRADE_CONTRACT_ID": "9001",
+    "CROSSTRADE_ACCOUNT_ID": "90000110", "CROSSTRADE_CONTRACT_ID": "9001",
     "CROSSTRADE_PLATFORM": "TRADOVATE", "CROSSTRADE_API_BASE": "https://stub/v1/api/tv",
 })
 responses = iter([
     trad_payload,
-    {"success": True, "data": {"id": 702, "accountId": 62838471, "contractId": 9001,
+    {"success": True, "data": {"id": 702, "accountId": 90000110, "contractId": 9001,
       "orderType": "Limit", "ordStatus": "Filled", "action": "Sell", "orderQty": 1,
       "price": 20040, "osId": "OCO-TV"}},
 ])

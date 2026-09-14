@@ -37,3 +37,6 @@ preview/
 # Claude Code の端末固有ファイル(launch.json は残す)
 .claude/settings.local.json
 .claude/*.lock
+
+# wrangler dev のローカル秘密(本番は wrangler secret put)
+cloudflare/.dev.vars*

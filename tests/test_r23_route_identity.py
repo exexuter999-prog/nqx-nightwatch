@@ -29,7 +29,7 @@ import order                                            # noqa: E402
 import route_envelope                                   # noqa: E402
 import route_identity                                   # noqa: E402
 
-ACCOUNT = "APEX4568750000009"
+ACCOUNT = "APEX0000000000009"
 SYMBOL = "MNQU6"
 BARE_SUCCESS = json.dumps({"success": True})
 
@@ -305,7 +305,7 @@ class MachineEnvelopeHygieneTests(unittest.TestCase):
 
 def tradovate_row(order_id, action="SELL", status="WORKING", parent=None, account=ACCOUNT):
     """CrossTrade/Tradovate の実データ形(2026-09-04 23:58 実測): 数量・種別・価格が無い。"""
-    return {"orderId": order_id, "accountId": account, "brokerAccountId": "64739295",
+    return {"orderId": order_id, "accountId": account, "brokerAccountId": "90000024",
             "symbol": SYMBOL, "contractId": "4399654", "status": status,
             "orderType": None, "action": action, "qty": None, "fieldsComplete": False,
             "limitPrice": None, "filledPrice": None, "stopPrice": None, "filled": None,

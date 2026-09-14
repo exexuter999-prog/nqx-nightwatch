@@ -689,9 +689,9 @@ function accountsPayload(overrides = {}) {
     observedAt: new Date(T0).toISOString(),
     source: "crosstrade-env",
     list: [
-      { id: "LFE02562316710002", cap: 60, buffer: 816 },
-      { id: "LFE02562316710003", cap: 60, buffer: 407 },
-      { id: "LFE02562316710004", cap: 50, buffer: 249 },
+      { id: "LFE00000000000002", cap: 60, buffer: 816 },
+      { id: "LFE00000000000003", cap: 60, buffer: 407 },
+      { id: "LFE00000000000004", cap: 50, buffer: 249 },
     ],
     ...overrides,
   };

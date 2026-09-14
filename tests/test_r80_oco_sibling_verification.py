@@ -54,7 +54,7 @@ SYM = "MNQU6"
 def raw_row(order_id, action, status, oco=None, parent=None, linked=None,
             ts="2026-09-11T16:52:56.051Z"):
     """CrossTrade REST が返す Tradovate の生の注文行(2026-09-12 実測の形。id は架空)。"""
-    row = {"accountId": 64968904, "action": action, "admin": False, "archived": False,
+    row = {"accountId": 90000006, "action": action, "admin": False, "archived": False,
            "contractId": 4399654, "executionProviderId": 14, "external": False,
            "id": order_id, "ordStatus": status, "timestamp": ts}
     if oco is not None:
@@ -97,7 +97,7 @@ class NormalizationTests(unittest.TestCase):
     def normalize(self, *rows):
         return broker_status.normalize_crosstrade_orders(
             {"success": True, "data": list(rows)}, platform="TRADOVATE", account=ACC, symbol=SYM,
-            account_aliases=["64968904"], contract_ids=["4399654"])
+            account_aliases=["90000006"], contract_ids=["4399654"])
 
     def test_raw_links_are_kept_separately(self):
         normalized = self.normalize(

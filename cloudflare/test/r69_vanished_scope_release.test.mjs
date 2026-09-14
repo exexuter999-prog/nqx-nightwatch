@@ -1,7 +1,7 @@
 // R69: claim の accountScope の口座がブローカーから消えたら、名簿を不在の証明として解放する。
 //
-// 2026-09-08 17:54: Lucid Flex 50K の評価通過で LFE05062316710024 が CrossTrade から消え、
-// funded 口座 LFF05062316710006 に入れ替わった。旧口座 scope の ENTRY claim(15:09、CONSUMED/SENT)は
+// 2026-09-08 17:54: Lucid Flex 50K の評価通過で LFE00000000000024 が CrossTrade から消え、
+// funded 口座 LFF00000000000006 に入れ替わった。旧口座 scope の ENTRY claim(15:09、CONSUMED/SENT)は
 // 「scope 内口座の観測で建玉 0」を永久に証明できず、新口座の ARMED 候補が
 // ENTRY_CLAIM_ALREADY_HELD で全部止まった(2026-08-31 の 3 日ロックと同型)。
 //
@@ -18,8 +18,8 @@ import { applyEvent, emptyState, strategyEvidenceHash, entryKeyForTuple,
 const T0 = Date.parse("2026-09-08T06:09:00Z");
 const STALE_MS = 900_000;            // execution_contract.claim.staleReleaseSec
 const iso = (ms = T0) => new Date(ms).toISOString();
-const OLD_ACCOUNT = "LFE05062316710024";
-const NEW_ACCOUNT = "LFF05062316710006";
+const OLD_ACCOUNT = "LFE00000000000024";
+const NEW_ACCOUNT = "LFF00000000000006";
 
 function frozenEvidence() {
   const raw = { version: "R14-STRATEGY-EVIDENCE-1", asOf: iso(), sessionId: "NY-20260908",

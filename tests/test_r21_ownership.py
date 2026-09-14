@@ -323,14 +323,14 @@ class R21OwnershipBinderTests(unittest.TestCase):
 class R21CrossTradeTruthTests(unittest.TestCase):
     def adapter(self, **changes):
         cfg = {"CROSSTRADE_KEY": "stub", "CROSSTRADE_ACCOUNT": "ACC-R21",
-               "CROSSTRADE_ACCOUNT_ID": "62838471", "CROSSTRADE_CONTRACT_ID": "9001",
+               "CROSSTRADE_ACCOUNT_ID": "90000110", "CROSSTRADE_CONTRACT_ID": "9001",
                "CROSSTRADE_PLATFORM": "TRADOVATE",
                "CROSSTRADE_API_BASE": "https://stub/v1/api/tv"}
         cfg.update(changes)
         return broker_status.CrossTradeAdapter(cfg)
 
     def test_position_requires_explicit_success_response_account_and_instrument(self):
-        valid = {"success": True, "data": {"accountId": 62838471, "contractId": 9001,
+        valid = {"success": True, "data": {"accountId": 90000110, "contractId": 9001,
                                             "netPos": 0, "position": {}}}
         with patch.object(broker_status, "_get_json", return_value=valid):
             result = self.adapter().query("MNQU6")
@@ -339,8 +339,8 @@ class R21CrossTradeTruthTests(unittest.TestCase):
         for payload in (
             {"data": valid["data"]},
             {"success": True, "data": {**valid["data"], "accountId": "OTHER"}},
-            {"success": True, "data": {"accountId": 62838471, "netPos": 0}},
-            {"success": True, "data": {"accountId": 62838471, "contractId": 9001}},
+            {"success": True, "data": {"accountId": 90000110, "netPos": 0}},
+            {"success": True, "data": {"accountId": 90000110, "contractId": 9001}},
         ):
             with patch.object(broker_status, "_get_json", return_value=payload), self.subTest(payload=payload):
                 with self.assertRaises(broker_status.Unavailable):

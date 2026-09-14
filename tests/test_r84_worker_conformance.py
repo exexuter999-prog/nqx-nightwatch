@@ -102,7 +102,7 @@ BASE_INTENT = dict(
           {"id": "RUNNER", "qty": 1, "target": 29300.0}],
     plan_version="R19-ICT-SPLIT-1",
     execution_contract_version=execution_contract.VERSION,
-    account_scope=["LFF05062316710006"])
+    account_scope=["LFF00000000000006"])
 PY_BASE = execution_intent.build(**BASE_INTENT)
 PY_ADD = execution_intent.build(
     **{**BASE_INTENT, "qty": 6,

@@ -19,7 +19,7 @@ import ownership_binder  # noqa: E402
 
 PASS = [0]
 FAIL = [0]
-ACC = "LFF05062316710006"
+ACC = "LFF00000000000006"
 
 
 def check(label, condition, detail=""):
