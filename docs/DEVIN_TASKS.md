@@ -15,7 +15,7 @@ nightwatch の弱点は **(1) 実測 N が小さい(決済 42 件、11 件は帰
 
 ## 0. 先に人がやること(Devin はここから先しか見えない)
 
-### 0.1 git 化する(2026-09-15: `.gitignore` 設置と `git init` は済み。commit と push は未)
+### 0.1 git 化する(2026-09-15 完了: private リポ `github.com/exexuter999-prog/nqx-nighwatch` へ push 済み)
 
 Devin は GitHub リポジトリを前提にする。**`.secrets/` は絶対に入れない**(CrossTrade キー・bot token・
 台帳・監査コピー 116MB)。ルートの `.gitignore` が正本で、`.secrets/`・`*.env`・`node_modules/`・
@@ -24,13 +24,14 @@ Devin は GitHub リポジトリを前提にする。**`.secrets/` は絶対に�
 `.claude/settings.local.json` を除外している。除外後の追跡対象は 703 ファイル・約 103MB
 (うち `telegram_mini_app/public` のステッカー GIF が大半)。
 
-残りは PowerShell 5.1(`&&` は使えない)で:
+リモートは `origin`(master)。本番ツリーから追加の変更を送るときは PowerShell 5.1(`&&` は使えない)で:
 
 ```powershell
 cd "C:\Users\exexu\Downloads\nq-nightwatch-claude-code-handoff"
 git add .
 git status --short | Select-String "secrets"   # 何も出ないことを確認してから commit
-git commit -m "Initial import for Devin (secrets excluded)"
+git commit -m "<変更内容>"
+git push
 ```
 
 2026-09-15 ユーザー決定で push 前に次を済ませた:
@@ -45,7 +46,7 @@ git commit -m "Initial import for Devin (secrets excluded)"
   (git 管理外)。**deploy と secret 投入は運用者**(手順は §0.4)。
 - `grep` 済み: API キー本体・bot token・`sk_` 系トークンは追跡対象に無い(2026-09-15 確認)。
 
-### 0.4 Worker 側の secret 移行(【人】1 回だけ。2026-09-15 時点で未実施)
+### 0.4 Worker 側の secret 移行(【人】1 回だけ。2026-09-15 に実施済み。`wrangler secret list` で 2 つを確認、認証付き `/api/state` 正常)
 
 同じ名前を var と secret の両方に置けないので、**deploy(var を外す)→ secret 投入**の順になる。
 その間(数十秒)は Worker の認証が `NQX_ALLOWED_USER_ID is not configured` で 500 を返すので、
