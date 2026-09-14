@@ -15,7 +15,7 @@ nightwatch の弱点は **(1) 実測 N が小さい(決済 42 件、11 件は帰
 
 ## 0. 先に人がやること(Devin はここから先しか見えない)
 
-### 0.1 git 化する(2026-09-15 完了: private リポ `github.com/exexuter999-prog/nqx-nighwatch` へ push 済み)
+### 0.1 git 化する(2026-09-15 完了: private リポ `github.com/exexuter999-prog/nqx-nightwatch` へ push 済み)
 
 Devin は GitHub リポジトリを前提にする。**`.secrets/` は絶対に入れない**(CrossTrade キー・bot token・
 台帳・監査コピー 116MB)。ルートの `.gitignore` が正本で、`.secrets/`・`*.env`・`node_modules/`・
