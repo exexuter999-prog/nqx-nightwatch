@@ -703,6 +703,12 @@ N<200 の行は PF を結論にしない旨を機械的に注記。時間分割�
 やらないこと: 契約の値を変える PR。1 分足の順序を仮定して楽観側に約定させること。
 ```
 
+**K-3(2026-09-16、Claude Code が実装済み・`docs/R103_3_SWEEP_GATE.md`)**: 掃引ゲート(`stopLogic.sweepGate`、
+SHADOW)、指値取消の配線(`restingStopRecheck` LIVE の経路)、再生 `replay_r103.py`。再生の結論:
+POOL(SL をプールの向こう)は逐次 +11.6R → +19.1R で LIVE 推奨、SWEEP は「掃引後に通った」周期が 0 で
+見送りフィルタにしかならない。**K-2 の変種 6 は「掃引を起点にする候補(TURTLE の再有効化 + R88 の掃引極値
+SL)」に置き換える**こと。
+
 **【人】がやること**(Devin の外):
 - B-0 の corpus export(監視窓の外か、ループを止めているとき)。K-2 はこれが無いと fixture 止まり。
 - **1 分足の取得**: `tv_fetch` に 1 分足(`data_get_ohlcv` を pane 1 で解像度 1・240 本)を足し、

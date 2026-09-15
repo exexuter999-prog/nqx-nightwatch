@@ -102,6 +102,18 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   逐次再生で改善せず(BREAKER を RISK_CAP_EXCEEDED の WATCH に変えるだけ)、ユーザー判断まで OFF。
   SL が変わる節は FLAT・primary なしのときに切り替える。検証は `python stop_logic.py --policy` /
   `python replay_stop_logic.py`(読むだけ)/ `python tests/test_r90_stop_logic.py`。
+- **SL 狩り対策(R103, 2026-09-16)**: 設定は `execution_contract.json` の `stopLogic` の 3 節、根拠は
+  `docs/reports/STOP_HUNT_EVIDENCE_2026-09-15.md` と `docs/R103_1_LIQUIDITY_POOL_STOP.md` /
+  `docs/R103_3_SWEEP_GATE.md`。(1) `poolClearance`: 元の SL の外側 1N 以内に未回収の流動性プール
+  (スイング高安 / セッション高安 / VAH・VAL / 前日高安)があれば SL をその向こう 0.25N へ逃がす(採点の前。
+  60pt 上限・R:R が壊れれば WATCH。decisionId も変わる。記録タグ `POOL_STOP_CLEARED`)。逐次再生で
+  ΣR +11.6 → +19.1、損切り 14 → 9。(2) `sweepGate`: 同じ幾何の候補を「プールの掃引→奪還」まで待つ。
+  再生では掃引後に通った周期が 0(候補が先に別の幾何になる)で、実効は見送り。**SHADOW で記録のみ**。
+  (3) `restingStopRecheck`: 指値を保持している周期に SL 幅を今のノイズ床(寄付き 30 分は寄付き後の
+  レンジ中央値との max)で再検査し、LIVE なら R52 と同じ経路で取り消す(`RESTING_STOP_CANCEL`)。
+  決済の分類(`STOP_HUNT / WRONG_WAY / DEEP`)は `python model_scorecard.py --excursions`。
+  切替は mode の 1 値ずつ、SL が変わる節は FLAT のときに。検証は `python tests/test_r103_sweep_gate.py` /
+  `python replay_r103.py`(読むだけ)。
 - **口座別リスク上限(`RISK_<口座ID>`)は経路ではなく口座の性質**として扱う(R45)。
   その上限を割る口座は `accountScope` から外して残りの口座で継続し、
   **全口座が払えないときだけ**シナリオを不合格(WATCH)にする。外した口座は

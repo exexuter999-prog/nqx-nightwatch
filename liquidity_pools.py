@@ -47,6 +47,13 @@ _LABEL_RULES = (
 EVIDENCE_WITHIN_1N = "STOP_POOL_WITHIN_1N"
 EVIDENCE_BETWEEN = "POOL_BETWEEN_ENTRY_STOP"
 EVIDENCE_CLEARED = "POOL_STOP_CLEARED"
+#: R103-3 掃引ゲート。LIVE で通ったとき / SHADOW で「待つ」「通す」と判定したとき(記録専用)。
+EVIDENCE_SWEEP_PASSED = "SWEEP_GATE_PASSED"
+EVIDENCE_SWEEP_WOULD_WAIT = "SWEEP_GATE_WOULD_WAIT"
+EVIDENCE_SWEEP_WOULD_PASS = "SWEEP_GATE_WOULD_PASS"
+#: LIVE で候補を止める理由(hardBlockers)。
+BLOCKER_SWEEP_PENDING = "SWEEP_PENDING"
+BLOCKER_SWEEP_STALE = "SWEEP_STALE"
 
 #: ``inside025N`` の窓。名前のとおり固定 0.25N(契約の clearN とは別物)。
 INSIDE_N = 0.25
@@ -60,7 +67,8 @@ def _bars(bars: Any) -> List[Dict[str, Any]]:
         high, low = finite(bar.get("h", bar.get("high"))), finite(bar.get("l", bar.get("low")))
         if high is None or low is None or high < low:
             continue
-        rows.append({"t": finite(bar.get("t", bar.get("time"))), "h": high, "l": low})
+        rows.append({"t": finite(bar.get("t", bar.get("time"))), "h": high, "l": low,
+                     "c": finite(bar.get("c", bar.get("close")))})
     return rows
 
 
@@ -264,3 +272,146 @@ def describe(audit: Dict[str, Any]) -> str:
     return (f"R103 pool clearance SL {audit.get('original')}→{audit['required']} "
             f"(pool {nearest.get('price')} {nearest.get('kind')} gap {nearest.get('gapPt')}pt) "
             f"[{audit.get('mode')}]")
+
+
+# ---------------------------------------------------------------- R103-3: 掃引→奪還
+
+SWEEP_STATES = ("NOT_SWEPT", "SWEPT_NO_RECLAIM", "SWEPT_RECLAIMED")
+
+
+def sweep_reclaim(bars: Any, pool_price: Any, side: str, origin_t: Any, tol: Any,
+                  reclaim_bars: int = 2) -> Dict[str, Any]:
+    """プール価格の**最新の**掃引エピソードと、その奪還(純粋関数)。
+
+    ``side`` は候補の方向。SELL なら SL は上にあり、プールも上側 —— 掃引は高値がプールを
+    ``tol`` 抜けること、奪還は終値がプールの内側(下)へ戻ること。BUY は鏡像。
+    ``origin_t`` より後の確定足だけを見る(候補の構造の起点より前の掃引は使わない)。
+
+    返す ``state``:
+      NOT_SWEPT          起点以降にプールを抜けた足が無い
+      SWEPT_NO_RECLAIM   抜けたが ``reclaim_bars`` 本(掃引足を含む)以内に内側で引けていない(受容 or 進行中)
+      SWEPT_RECLAIMED    抜けて内側で引けた。``extreme`` = 掃引の極値、``ageBars`` = 奪還足からの本数
+    """
+    rows = _bars(bars)
+    upper = str(side or "").upper() == "SELL"
+    price = finite(pool_price)
+    tol_f = finite(tol) or 0.0
+    out: Dict[str, Any] = {"state": "NOT_SWEPT", "pool": price, "sweepBarT": None, "reclaimBarT": None,
+                           "extreme": None, "ageBars": None, "sweepDepthPt": None}
+    if price is None or not rows:
+        return out
+    origin = finite(origin_t)
+    scoped = [b for b in rows if origin is None or (b["t"] is not None and b["t"] > origin)]
+    if not scoped:
+        return out
+    last = len(scoped) - 1
+
+    def beyond(bar: Dict[str, Any]) -> bool:
+        return (bar["h"] > price + tol_f) if upper else (bar["l"] < price - tol_f)
+
+    def reclaimed(bar: Dict[str, Any]) -> bool:
+        close = bar.get("c")
+        return close is not None and ((close < price) if upper else (close > price))
+
+    start = None
+    for idx in range(last, -1, -1):
+        if beyond(scoped[idx]) and (idx == 0 or not beyond(scoped[idx - 1])):
+            start = idx
+            break
+    if start is None:
+        return out
+    out["sweepBarT"] = scoped[start]["t"]
+    # reclaim_bars = 奪還を待つ本数(掃引足を含む)。2 なら「掃引足そのもの」か「その次の足」で
+    # 内側に引けたときだけ奪還(R88 の 2 本型と同じ窓)。
+    window = max(1, int(reclaim_bars))
+    end = None
+    for k in range(start, min(last, start + window - 1) + 1):
+        if reclaimed(scoped[k]):
+            end = k
+            break
+    span = scoped[start:(end if end is not None else min(last, start + window - 1)) + 1]
+    extreme = max(b["h"] for b in span) if upper else min(b["l"] for b in span)
+    out["extreme"] = round(float(extreme), 2)
+    out["sweepDepthPt"] = round(abs(float(extreme) - price), 2)
+    if end is None:
+        out["state"] = "SWEPT_NO_RECLAIM"
+        return out
+    out.update({"state": "SWEPT_RECLAIMED", "reclaimBarT": scoped[end]["t"], "ageBars": last - end})
+    return out
+
+
+def sweep_gate_audit(side: str, entry: Any, stop: Any, pool_audit: Optional[Dict[str, Any]],
+                     bars: Any, origin_t: Any, noise: Any, tol: Any,
+                     rule: Optional[Dict[str, Any]] = None,
+                     model: Optional[str] = None) -> Dict[str, Any]:
+    """掃引ゲートの監査(純粋関数)。置き換えるかどうかは呼び出し側が決める。
+
+    ``pool_audit`` は ``stop_pool_audit`` の結果(``nearestBeyond`` は**元の** SL に対する最寄りの
+    外側プール)。そのプールが ``poolWithinN``×N 以内に無ければ ``NOT_APPLICABLE``(候補は現行どおり)。
+    あれば ``sweep_reclaim`` で掃引→奪還を見て、
+
+      PENDING   まだ掃引されていない / 奪還されていない(LIVE なら候補は WATCH)
+      STALE     奪還から ``maxAgeBars`` 本より経った(LIVE なら候補は WATCH)
+      PASSED    奪還が新しい。``required`` = 掃引極値の向こう ``sweepStopN``×N(不利側 tick)
+    """
+    rule = rule or stop_logic.DEFAULT_SWEEP
+    audit: Dict[str, Any] = {"version": VERSION_R103, "mode": rule.get("mode", "OFF"), "model": model,
+                             "state": None, "pool": None, "sweepState": None, "sweepBarT": None,
+                             "reclaimBarT": None, "extreme": None, "ageBars": None,
+                             "required": None, "applied": False, "reason": None,
+                             "original": finite(stop)}
+    side = str(side or "").upper()
+    entry_f, stop_f, nf = finite(entry), finite(stop), finite(noise)
+    if model is not None and model not in (rule.get("models") or []):
+        audit["state"], audit["reason"] = "NOT_APPLICABLE", "MODEL_NOT_IN_POLICY"
+        return audit
+    if side not in {"BUY", "SELL"} or entry_f is None or stop_f is None:
+        audit["state"], audit["reason"] = "NOT_APPLICABLE", "GEOMETRY_MISSING"
+        return audit
+    if nf is None or nf <= 0:
+        audit["state"], audit["reason"] = "NOT_APPLICABLE", "NOISE_FLOOR_MISSING"
+        return audit
+    if not isinstance(pool_audit, dict):
+        audit["state"], audit["reason"] = "NOT_APPLICABLE", "POOLS_MISSING"
+        return audit
+    nearest = pool_audit.get("nearestBeyond")
+    within_pt = float(rule.get("poolWithinN", 1.0)) * nf
+    kinds = rule.get("kinds") or list(POOL_KINDS)
+    gap = finite((nearest or {}).get("gapPt")) if isinstance(nearest, dict) else None
+    if (not isinstance(nearest, dict) or gap is None or gap > within_pt + 1e-9
+            or nearest.get("kind") not in kinds):
+        audit["state"], audit["reason"] = "NOT_APPLICABLE", "NO_POOL_WITHIN_N"
+        return audit
+    audit["pool"] = {"price": nearest.get("price"), "kind": nearest.get("kind"),
+                     "label": nearest.get("label"), "gapPt": gap}
+    swept = sweep_reclaim(bars, nearest.get("price"), side, origin_t, tol,
+                          int(rule.get("reclaimBars", 2)))
+    audit.update({"sweepState": swept["state"], "sweepBarT": swept["sweepBarT"],
+                  "reclaimBarT": swept["reclaimBarT"], "extreme": swept["extreme"],
+                  "ageBars": swept["ageBars"], "sweepDepthPt": swept["sweepDepthPt"]})
+    if swept["state"] != "SWEPT_RECLAIMED":
+        audit["state"], audit["reason"] = "PENDING", "SWEEP_PENDING"
+        return audit
+    if int(swept["ageBars"] or 0) > int(rule.get("maxAgeBars", 3)):
+        audit["state"], audit["reason"] = "STALE", "SWEEP_STALE"
+        return audit
+    sgn = 1.0 if side == "BUY" else -1.0
+    buffer = float(rule.get("sweepStopN", 0.25)) * nf
+    required = outward_tick(float(swept["extreme"]) - sgn * buffer, side)
+    audit.update({"state": "PASSED", "reason": None, "required": required,
+                  "shiftPt": round((stop_f - required) * sgn, 2),
+                  "riskPt": round((entry_f - required) * sgn, 2),
+                  "riskN": round((entry_f - required) * sgn / nf, 2)})
+    return audit
+
+
+def sweep_evidence_tags(audit: Optional[Dict[str, Any]]) -> List[str]:
+    """SHADOW の記録専用タグ。採点・等級・decisionId には使わない。"""
+    if not isinstance(audit, dict):
+        return []
+    state = audit.get("state")
+    if state in ("PENDING", "STALE"):
+        return [EVIDENCE_SWEEP_WOULD_WAIT]
+    if state == "PASSED":
+        return [EVIDENCE_SWEEP_WOULD_PASS]
+    return []

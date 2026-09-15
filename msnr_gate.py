@@ -555,6 +555,69 @@ def _compact_pool_audit(audit):
     return compact
 
 
+def _sweep_origin_t(chain):
+    """掃引ゲートが「これより後の掃引だけを見る」起点の時刻。VP80 は再突入エピソードの起点。"""
+    if not isinstance(chain, dict):
+        return None
+    origin = chain.get("originBarT")
+    if origin is None:
+        origin = chain.get("sweepBarT") if chain.get("type") == "SWEEP" else chain.get("breakBarT")
+    try:
+        return int(origin) if origin is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_sweep_gate(model, side, entry, original_stop, current_stop, bars, levels, chain, bundle, nf):
+    """R103-3。``(stop, audit)``。OFF は ``(current_stop, None)``、SHADOW は記録だけ、LIVE は
+    PASSED なら SL を掃引極値の向こうへ置換(PENDING / STALE は呼び出し側が WATCH にする)。
+
+    プールは **元の SL**(VWAP 逃がし後・プール逃がし前)に対して見る。プール逃がしが SL を
+    動かした後で見ると「もうプールは内側」になり、掃引を待つ判定が消えてしまうため。
+    この層の例外で評価を落とさない —— 失敗は「今の SL のまま」に倒し、理由を audit に残す。
+    """
+    policy = stop_logic_policy()
+    rule = policy.get("sweepGate") if isinstance(policy, dict) else None
+    if not isinstance(rule, dict) or str(rule.get("mode") or "OFF") == "OFF":
+        return current_stop, None
+    try:
+        import stop_logic
+        price = _num(bundle, "price") if isinstance(bundle, dict) else None
+        if price is None and bars:
+            price = bars[-1]["c"]
+        tol = max(params()["touch_pt"], 0.10 * nf) if nf else None
+        rows = (liquidity_pools.pools(bars, levels, price, tol, nf)
+                if (bars or levels) else None)
+        pool_rule = {"mode": rule.get("mode"), "withinN": rule.get("poolWithinN", 1.0),
+                     "clearN": 0.25, "kinds": rule.get("kinds") or list(stop_logic.POOL_KINDS),
+                     "models": list(stop_logic.ALL_MODELS)}
+        base = liquidity_pools.stop_pool_audit(side, entry, original_stop, rows, nf, pool_rule, model=None)
+        audit = liquidity_pools.sweep_gate_audit(side, entry, original_stop, base, bars,
+                                                 _sweep_origin_t(chain), nf, tol, rule, model=model)
+    except Exception as exc:  # noqa: BLE001
+        return current_stop, {"mode": rule.get("mode"), "model": model, "state": "ERROR",
+                              "applied": False, "reason": f"ERROR:{type(exc).__name__}"}
+    audit["applied"] = bool(str(rule.get("mode")) == "LIVE" and audit.get("state") == "PASSED"
+                            and audit.get("required") is not None)
+    if audit["applied"]:
+        return audit["required"], audit
+    return current_stop, audit
+
+
+def _compact_sweep_audit(audit):
+    """カードに載せる分だけ。"""
+    if not isinstance(audit, dict):
+        return {}
+    compact = {key: audit.get(key) for key in ("mode", "state", "applied", "reason", "sweepState",
+                                               "sweepBarT", "reclaimBarT", "extreme", "ageBars",
+                                               "original", "required", "shiftPt", "riskN")
+               if audit.get(key) is not None}
+    pool = audit.get("pool")
+    if isinstance(pool, dict):
+        compact["pool"] = {"price": pool.get("price"), "kind": pool.get("kind"), "gapPt": pool.get("gapPt")}
+    return compact
+
+
 def _mss_reference(bars, sweep_idx, lookback, side):
     """MSS の参照窓 = sweepBar の直前 5 本。3 本未満なら判定不能で None。"""
     window = bars[max(0, sweep_idx - lookback):sweep_idx]
@@ -2803,7 +2866,12 @@ def _candidate_for_chain(model, level, chain, bars, levels, ict, regime_info, bu
     stop, vwap_audit = _apply_vwap_clearance(model, side, entry, stop, bundle, nf)
     # R103-1: SL の外側に未回収の流動性プールがあれば、その向こうへ逃がして**から**採点する
     # (SHADOW は記録だけ)。LIVE の場合も targets・R:R・SL 上限・decisionId は最終の SL で決まる。
+    stop_before_pool = stop
     stop, pool_audit = _apply_pool_clearance(model, side, entry, stop, bars, levels, bundle, nf)
+    # R103-3: 元の SL の外側 1N 以内にプールがある候補は、掃引→奪還を待つ(LIVE: 待つ間は WATCH、
+    # 通れば SL は掃引極値の向こう。SHADOW: 記録だけ)。targets・R:R・上限・decisionId は最終の SL。
+    stop, sweep_audit = _apply_sweep_gate(model, side, entry, stop_before_pool, stop, bars, levels,
+                                          chain, bundle, nf)
     targets = (targets_override if targets_override is not None
                else model_targets(entry, stop, side, levels, ict, extra=extra_targets))
     candidate = {
@@ -2833,6 +2901,19 @@ def _candidate_for_chain(model, level, chain, bars, levels, ict, regime_info, bu
         else:
             # SHADOW の観測。判定・採点・等級・decisionId には触れない。
             candidate["evidence"].extend(liquidity_pools.evidence_tags(pool_audit))
+    if sweep_audit is not None:
+        candidate["sweepGate"] = sweep_audit
+        gate_state = sweep_audit.get("state")
+        if sweep_audit.get("applied"):
+            # R103-3: 掃引→奪還を確認してから建てた印。記録専用。
+            candidate["evidence"].append(liquidity_pools.EVIDENCE_SWEEP_PASSED)
+        elif str(sweep_audit.get("mode") or "") == "LIVE" and gate_state in ("PENDING", "STALE"):
+            # LIVE: プールが SL の外側にある間は掃引を待つ(候補は WATCH)。
+            candidate["hardBlockers"].append(
+                liquidity_pools.BLOCKER_SWEEP_PENDING if gate_state == "PENDING"
+                else liquidity_pools.BLOCKER_SWEEP_STALE)
+        else:
+            candidate["evidence"].extend(liquidity_pools.sweep_evidence_tags(sweep_audit))
     if not targets:
         candidate["hardBlockers"].append("TARGET_HEADROOM_INSUFFICIENT")
     if abs(entry - stop) > sl_cap_pt():
@@ -2993,8 +3074,14 @@ def candidate_vp80(result, bars, levels, ict, regime_info, bundle, nf, strategy_
         extra = [(float(_tick_price(vp["target"])), "VA_TARGET")]
     # R90: targets は _candidate_for_chain が**最終の SL**(VWAP 逃がし後)で組む。
     # ここで先に組むと、SL が動いた候補の R・ラダーが古い SL の値のまま公開される。
+    try:
+        origin_t = int(episode_t) if episode_t is not None else None
+    except (TypeError, ValueError):
+        origin_t = None
     fake = {"type": "SWEEP", "side": side, "state": vp["state"],
             "sweepBarT": int(bars[-1]["t"]) if bars else None,
+            # R103-3: 掃引ゲートは再突入エピソードの起点より後の掃引だけを見る。
+            "originBarT": origin_t,
             "dispBody": max((abs(b["c"] - b["o"]) for b in bars[-3:]), default=0)}
     # 最終的な建値/SL をそのまま採点に渡す。以前は VA edge の幾何で採点して
     # から entry/stop を上書きしていたため、SL 上限も R 判定も別のトレードの
@@ -3454,6 +3541,8 @@ def select_primary(candidates, bundle=None):
         "vwapStop": _compact_vwap_audit(chosen.get("vwapStop")),
         # R103-1: OFF のときはキーごと足さない(出力を R103 以前と同一に保つ)。
         **({"poolStop": _compact_pool_audit(chosen["poolStop"])} if chosen.get("poolStop") else {}),
+        # R103-3: 掃引ゲートの監査。OFF ではキーごと無い。
+        **({"sweepGate": _compact_sweep_audit(chosen["sweepGate"])} if chosen.get("sweepGate") else {}),
         "modelRank": [c["model"] + ":" + str(c.get("grade")) for c in candidates[:4]],
     }
 
@@ -4009,7 +4098,7 @@ def build_card(result, sl_cap=None, price=None, side=None,
                 "decisionId", "phase", "model", "side", "state", "grade", "score",
                 "entryMode", "entry", "stop", "targets", "targetR", "hardBlockers",
                 "penalties", "evidence", "modelRank", "strategyModels", "strategyAlignment", "strategyBias",
-                "silverBullet", "vwapStop", "poolStop",
+                "silverBullet", "vwapStop", "poolStop", "sweepGate",
             ) if key in decision
         }
     msnr = _card_msnr(result, price, side)
@@ -4199,6 +4288,7 @@ def _shrink_card(card):
         # R103-1: SHADOW の監査(poolStop)は evidence の記録タグより先に落とす。
         # タグはスコアカードの分離キーで、監査は再生で復元できる。
         decision.pop("poolStop", None)
+        decision.pop("sweepGate", None)
         if _card_bytes(card) <= CARD_MAX_BYTES:
             return card
         decision.pop("modelRank", None)
