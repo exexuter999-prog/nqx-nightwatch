@@ -1,0 +1,414 @@
+{
+ "_note": "R103 fixture. 2026-09-15 の実トレード 4 件の武装時点の幾何(監査コピーから抜粋)。trade.fill/exit はブローカー約定。武装時点の評価(swingLiquidity・levels・noiseFloor)は直前 60 本の確定 3 分足で行われている(closedBarsAtArm)。bars3m_2026-09-15.json から armedAt 直前の 60 本を切れば同じ窓になる。口座情報は含まない。",
+ "cases": [
+  {
+   "tag": "T1",
+   "armedAt": "2026-09-15T07:48:11.929563+00:00",
+   "priceAtArm": 29318.5,
+   "vwapAtArm": 29413.03,
+   "noiseFloor": 21.25,
+   "decision": {
+    "model": "VP80_REVERSION",
+    "side": "BUY",
+    "grade": "B",
+    "score": 5,
+    "state": "ARMED",
+    "entry": 29316.25,
+    "stop": 29285.25,
+    "targets": [
+     29382.75,
+     29603.0
+    ],
+    "targetR": [
+     1.98,
+     9.08
+    ],
+    "entryMode": "AGGRESSIVE_ACCEPT_CLOSE",
+    "evidence": [
+     "ICT_LOCATION",
+     "ICT_KILLZONE",
+     "VP_ACCEPTED",
+     "ENTRY_DEPTH_025N"
+    ],
+    "penalties": [
+     "HTF_CONFLICT",
+     "CVD_AGAINST",
+     "HRLR",
+     "GANN_1X1_ROADBLOCK"
+    ],
+    "vwapStop": {
+     "applied": false,
+     "gapN": -5.77,
+     "mode": "LIVE",
+     "original": 29290.5,
+     "reason": "STOP_ALREADY_BEYOND_VWAP",
+     "vwap": 29413.03
+    }
+   },
+   "trade": {
+    "openedAt": "2026-09-15T07:49:15Z",
+    "closedAt": "2026-09-15T08:01:10Z",
+    "fill": 29316.25,
+    "exit": 29284.75,
+    "orderType": "LIMIT"
+   },
+   "swingLiquidity": {
+    "BSL": [
+     29382.75,
+     29396.0,
+     29404.25
+    ],
+    "SSL": [
+     29308.5
+    ]
+   },
+   "levels": [
+    {
+     "label": "C: VAH",
+     "price": 29603.0
+    },
+    {
+     "label": "C: VAL",
+     "price": 29324.75
+    },
+    {
+     "label": "C: POC",
+     "price": 29569.42
+    },
+    {
+     "label": "Weekly open",
+     "price": 29367.5
+    },
+    {
+     "label": "6pm open",
+     "price": 29495.75
+    },
+    {
+     "label": "Asia High",
+     "price": 29495.75
+    },
+    {
+     "label": "Asia Low",
+     "price": 29308.5
+    },
+    {
+     "label": "London High",
+     "price": 29396.0
+    },
+    {
+     "label": "London Low",
+     "price": 29311.75
+    }
+   ],
+   "closedBarsAtArm": 60
+  },
+  {
+   "tag": "T2",
+   "armedAt": "2026-09-15T12:19:39.318114+00:00",
+   "priceAtArm": 29432.5,
+   "vwapAtArm": 29376.77,
+   "noiseFloor": 14.62,
+   "decision": {
+    "model": "BREAKER_CONTINUATION",
+    "side": "BUY",
+    "grade": "B",
+    "score": 5,
+    "state": "ARMED",
+    "entry": 29427.5,
+    "stop": 29398.5,
+    "targets": [
+     29495.75,
+     29603.0
+    ],
+    "targetR": [
+     2.35,
+     6.05
+    ],
+    "entryMode": "STRUCTURE_RETEST",
+    "evidence": [
+     "CVD_ALIGNED",
+     "ICT_KILLZONE",
+     "DISPLACEMENT_FRESH",
+     "DISP_RESEARCH_1_5X",
+     "LEVEL_BODY_INTACT"
+    ],
+    "penalties": [
+     "RANGE_ANCHOR_MISSING",
+     "HTF_CONFLICT",
+     "GANN_1X1_ROADBLOCK"
+    ],
+    "vwapStop": {
+     "applied": false,
+     "gapN": 1.49,
+     "mode": "LIVE",
+     "original": 29398.5,
+     "reason": "VWAP_FAR_FROM_STOP",
+     "vwap": 29376.77
+    }
+   },
+   "trade": {
+    "openedAt": "2026-09-15T12:20:25Z",
+    "closedAt": "2026-09-15T12:24:13Z",
+    "fill": 29427.0,
+    "exit": 29398.5,
+    "orderType": "MARKET"
+   },
+   "swingLiquidity": {
+    "BSL": [],
+    "SSL": [
+     29402.25,
+     29388.5,
+     29361.25,
+     29334.25
+    ]
+   },
+   "levels": [
+    {
+     "label": "C: VAH",
+     "price": 29603.0
+    },
+    {
+     "label": "C: VAL",
+     "price": 29324.75
+    },
+    {
+     "label": "C: POC",
+     "price": 29569.42
+    },
+    {
+     "label": "Weekly open",
+     "price": 29367.5
+    },
+    {
+     "label": "6pm open",
+     "price": 29495.75
+    },
+    {
+     "label": "London High",
+     "price": 29427.5
+    },
+    {
+     "label": "London Low",
+     "price": 29231.25
+    },
+    {
+     "label": "New York High",
+     "price": 29440.25
+    },
+    {
+     "label": "New York Low",
+     "price": 29404.25
+    }
+   ],
+   "closedBarsAtArm": 60
+  },
+  {
+   "tag": "T3",
+   "armedAt": "2026-09-15T12:31:34.299549+00:00",
+   "priceAtArm": 29413.75,
+   "vwapAtArm": 29376.54,
+   "noiseFloor": 16.5,
+   "decision": {
+    "model": "BREAKER_CONTINUATION",
+    "side": "SELL",
+    "grade": "A",
+    "score": 8,
+    "state": "ARMED",
+    "entry": 29427.5,
+    "stop": 29458.0,
+    "targets": [
+     29367.5,
+     29231.25
+    ],
+    "targetR": [
+     1.97,
+     6.43
+    ],
+    "entryMode": "STRUCTURE_RETEST",
+    "evidence": [
+     "ICT_LOCATION",
+     "HTF_ALIGNED",
+     "PO3_ALIGNED",
+     "ICT_KILLZONE",
+     "LEVEL_BODY_INTACT"
+    ],
+    "penalties": [
+     "CVD_AGAINST",
+     "GANN_1X1_ROADBLOCK"
+    ],
+    "vwapStop": {
+     "applied": false,
+     "gapN": -4.94,
+     "mode": "LIVE",
+     "original": 29458.0,
+     "reason": "STOP_ALREADY_BEYOND_VWAP",
+     "vwap": 29376.54
+    }
+   },
+   "trade": {
+    "openedAt": "2026-09-15T12:34:53Z",
+    "closedAt": "2026-09-15T12:48:50Z",
+    "fill": 29427.5,
+    "exit": 29458.0,
+    "orderType": "LIMIT"
+   },
+   "swingLiquidity": {
+    "BSL": [
+     29441.5
+    ],
+    "SSL": [
+     29388.5,
+     29361.25,
+     29334.25
+    ]
+   },
+   "levels": [
+    {
+     "label": "C: VAH",
+     "price": 29603.0
+    },
+    {
+     "label": "C: VAL",
+     "price": 29324.75
+    },
+    {
+     "label": "C: POC",
+     "price": 29569.42
+    },
+    {
+     "label": "Weekly open",
+     "price": 29367.5
+    },
+    {
+     "label": "6pm open",
+     "price": 29495.75
+    },
+    {
+     "label": "London High",
+     "price": 29427.5
+    },
+    {
+     "label": "London Low",
+     "price": 29231.25
+    },
+    {
+     "label": "New York High",
+     "price": 29441.5
+    },
+    {
+     "label": "New York Low",
+     "price": 29398.5
+    }
+   ],
+   "closedBarsAtArm": 60
+  },
+  {
+   "tag": "T4",
+   "armedAt": "2026-09-15T13:31:35.291545+00:00",
+   "priceAtArm": 29388.75,
+   "vwapAtArm": 29380.9,
+   "noiseFloor": 15.38,
+   "decision": {
+    "model": "BREAKER_CONTINUATION",
+    "side": "SELL",
+    "grade": "A+",
+    "score": 10,
+    "state": "ARMED",
+    "entry": 29426.0,
+    "stop": 29444.5,
+    "targets": [
+     29367.5,
+     29231.25
+    ],
+    "targetR": [
+     3.16,
+     10.53
+    ],
+    "entryMode": "STRUCTURE_RETEST",
+    "evidence": [
+     "ICT_LOCATION",
+     "HTF_ALIGNED",
+     "CVD_ALIGNED",
+     "ICT_KILLZONE",
+     "LEVEL_BODY_INTACT"
+    ],
+    "penalties": [],
+    "vwapStop": {
+     "applied": false,
+     "gapN": -4.14,
+     "mode": "LIVE",
+     "original": 29444.5,
+     "reason": "STOP_ALREADY_BEYOND_VWAP",
+     "vwap": 29380.9
+    }
+   },
+   "trade": {
+    "openedAt": "2026-09-15T13:38:51Z",
+    "closedAt": "2026-09-15T13:45:17Z",
+    "fill": 29426.0,
+    "exit": 29444.75,
+    "orderType": "LIMIT"
+   },
+   "swingLiquidity": {
+    "BSL": [
+     29447.0,
+     29484.25
+    ],
+    "SSL": [
+     29361.25
+    ]
+   },
+   "levels": [
+    {
+     "label": "C: POC",
+     "price": 29438.38
+    },
+    {
+     "label": "C: VAH",
+     "price": 29447.0
+    },
+    {
+     "label": "C: VAL",
+     "price": 29426.0
+    },
+    {
+     "label": "Weekly open",
+     "price": 29367.5
+    },
+    {
+     "label": "6pm open",
+     "price": 29495.75
+    },
+    {
+     "label": "P: POC",
+     "price": 29569.42
+    },
+    {
+     "label": "P: VAH",
+     "price": 29603.0
+    },
+    {
+     "label": "P: VAL",
+     "price": 29324.75
+    },
+    {
+     "label": "London High",
+     "price": 29427.5
+    },
+    {
+     "label": "London Low",
+     "price": 29231.25
+    },
+    {
+     "label": "New York High",
+     "price": 29484.25
+    },
+    {
+     "label": "New York Low",
+     "price": 29398.5
+    }
+   ],
+   "closedBarsAtArm": 60
+  }
+ ]
+}

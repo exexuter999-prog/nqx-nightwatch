@@ -2,6 +2,7 @@
 
 作成: 2026-09-15。R91(fill_watch 自動起動)までが実装済みの時点で書いた。
 番号は **R92〜R101 を Devin 用に予約**する(別セッションが同じ番号を取ったら次の空きへずらす)。
+R102 は限月ロール(2026-09-15)に使われたので、09-16 追加のタスク K は **R103**。
 
 Devin は「GitHub 上のリポジトリで、テストを回しながら PR を作る」道具である。
 nightwatch の弱点は **(1) 実測 N が小さい(決済 42 件、11 件は帰属不明)、(2) 事故は全部本番で
@@ -145,8 +146,10 @@ Settings → Resources → Knowledge に並ぶので、最初のセッション�
 | H | R98 裸 runner 脅威モデル(レッドチーム読解) | 建玉が保護ゼロ/管理外になる経路の全列挙 | なし | ○ |
 | I | R99 20 口座 90 日プランのモンテカルロ | 面白い枠。相関 1 の 20 口座で何が起きるかを数字に | なし | 規約の数値は【人】 |
 | J | R100 Worker の rows read 予算 | DO 無料枠 1101 で AUTO が丸一日死ぬ再発防止 | なし(deploy は人) | ○ |
+| **K** | **R103 流動性狩り対策(計測 → プール検出 → 再生)** | 直近の損切りは方向が合っていて SL の位置が狩られている。SL 側の流動性判定がコードに無い | なし(K-0/K-1 は既定 SHADOW・記録だけ。LIVE は人) | K-0 / K-1 は fixture で完結、K-2 は B-0 のあと |
 
-推奨順序: **A → B-0【人】→ B-1 / C / D / E(並行可)→ G / H → F(A が緑で、H を読んだ後)→ I / J**。
+推奨順序: **K-0 → K-1(fixture だけで着手可。2026-09-16 ユーザー相談で最優先)→ A → B-0【人】→
+K-2 / B-1 / C / D / E(並行可)→ G / H → F(A が緑で、H を読んだ後)→ I / J**。
 
 ---
 
@@ -554,6 +557,156 @@ deploy は運用者。契約値(execution_contract.json の共有キー)は変�
 完了条件: npm test 緑、表と削減前後の比較が docs にある。PR 本文に「deploy 必要」と
 「deploy 後に運用者が確認する 1 コマンド」を書く。
 ```
+
+---
+
+### K. R103 — 流動性狩り対策(計測 → プール検出 → 再生)【2026-09-16 追加・最優先】
+
+**背景**: 2026-09-15 の 4 連敗(VP80 B / BREAKER B / BREAKER A / BREAKER A+)は全部、損切りの後に
+価格が狙った方向へ進んだ(2 件は決済後 24〜80 分で TP1、1 件は TP2 まで。合計 200pt 超)。
+09-04〜09-15 の帰属済み損切り 19 件で見ても、決済後 3 時間以内に TP1 へ届いたものが 7 件、50pt 以上
+順行したものが 11 件。**弁別したのは「SL の外側 1N 以内に未回収の流動性プールがあるか」で、
+勝ち 0/7・負け 6/12**。一方コードは、`msnr_gate.swing_liquidity`(BSL/SSL)とセッション高安・VA 端を
+ターゲット・DOL・HRLR にしか使わず、**SL の計算では一度も見ていない**(R90 が VWAP だけ直した穴と同じ形)。
+数字と 6 つの欠落は `docs/reports/STOP_HUNT_EVIDENCE_2026-09-15.md`。09-15 の確定 3 分足と 4 件の
+幾何は `tests/fixtures/r103/`(口座情報なし)に固定してあり、Devin はこれだけでテストを書ける。
+
+**決めてあること(変えない)**:
+- 「SL だけ広げる」は採らない(R86 で否定済み)。効かせるのは **SL の位置**(プールの向こう側)と
+  **建値のタイミング**(掃引の後)。
+- 契約スイッチの既定は SHADOW(記録だけ)。LIVE に倒すのは人。SL が変わる節は FLAT・primary なしのときに
+  切り替える(R88 / R90 と同じ)。
+- 新モデルは足さない(EDGE_LEDGER 却下リスト)。既存 4 モデルの SL と建値タイミングを変える。
+- 再生は R86 / R90 と同じ**不利側**の規則。1 分足が無い(`tv_fetch` は 15 分と 3 分だけ)ので、
+  「掃引後に入る」型の再生は楽観側に倒れうる。その行には必ず印を付ける。
+- 計測(K-0)が先。効いたかどうかをスコアカードのタグで測れない変更は入れない(R48 の規律)。
+
+**入口**: `stop_logic.py`(`vwap_clearance` の形と `load_policy` の節ごとの検証)、
+`msnr_gate._candidate_for_chain` / `candidate_vp80` / `swing_liquidity` / `feature_tags` / `noise_floor`、
+`obsidian_metrics.excursions`(MAE/MFE の既存実装)、`model_scorecard.record`、
+`entry_depth.py` / `replay_stop_logic.py`(約定規則)、`autotrade_engine._market_stop_guard`(R90 穴 2)。
+
+**K-0(Devin)**:
+
+```text
+タスク R103-0: 決済トレードの「刈られ方」を計測する excursion_metrics.py を書き、スコアカード行へ追記する。
+
+背景と数字: docs/reports/STOP_HUNT_EVIDENCE_2026-09-15.md。固定データ: tests/fixtures/r103/
+(bars3m_2026-09-15.json = MNQ 3 分確定足、cases_2026-09-15.json = 4 件の武装時点の幾何と約定)。
+
+1. excursion_metrics.py(純関数。ネットワーク・台帳・発注に触れない):
+   classify(trade, bars, tp1, noise) → dict。trade は .secrets/model_scorecard.jsonl の 1 行と同じ形
+   (side LONG/SHORT、entry、stop、exit、openedAt、closedAt、outcome)。返すもの:
+     maePt / mfePt / maeR / mfeR / holdMin(保有中。確定 3 分足の高安)
+     beyondStopPt(決済後 15 分に SL をどこまで抜けたか。SL 到達でなければ null)
+     tp1AfterExitMin(決済後 180 分以内に TP1 へ届くまでの分。届かなければ null)
+     fav3hPt(決済後 3 時間の最大順行 pt)
+     huntClass: 損切りのとき
+       STOP_HUNT = tp1AfterExitMin が非 null、または(beyondStopPt ≤ 1.0×noise かつ fav3hPt ≥ 2×SL 幅)
+       WRONG_WAY = fav3hPt < 1×SL 幅
+       DEEP = それ以外
+     勝ちは WIN、建値付近は FLAT。しきい値は定数にして docstring に書く。
+   obsidian_metrics.excursions は同じ計算を持つ。中身をこのモジュールへ移し、obsidian_metrics は
+   これを呼ぶ形にして、既存の出力が変わらないことをゴールデンテストで固定する。
+2. model_scorecard.record が書く行に上の値を足す(既存キーと衝突しない名前。足が無ければ null)。
+   Worker へ publish する result ペイロードは変えない(Worker 側の検証に触れない)。
+   足は trade_journal が既に持つ確定 3 分足(result.view.market.bars と tv_raw)を注入引数で受ける。
+3. model_scorecard.py に --excursions を足す: モデル×等級ごとに huntClass の内訳、beyondStopPt と
+   tp1AfterExitMin の中央値を表にする。--backfill-excursions <bars_dir> で既存行を再計算し、
+   supersedes 付きの新行を追記する(既存行は消さない・書き換えない)。出力は cp932 でも落ちないように
+   sys.stdout を utf-8 に再設定する(既存の main() は「—」で UnicodeEncodeError を出す)。
+4. tests/test_r103_excursions.py: fixture の 4 件が全部 STOP_HUNT に分類され、beyondStopPt が
+   54.0 / 0.0 / 26.25 / 8.25、tp1AfterExitMin が 168 / null / 78 / 21(±3 分)になることを固定する。
+
+完了条件: fixture だけで通る純関数。python tests/run_all.py 緑。本番パスへの到達 0 件。
+やらないこと: 採点・武装・契約を変えること。publish ペイロードを変えること。
+```
+
+**K-1(Devin)**:
+
+```text
+タスク R103-1: SL 側の流動性プール検出と、SL をプールの向こうへ逃がす契約の節(既定 SHADOW)。
+
+背景: docs/reports/STOP_HUNT_EVIDENCE_2026-09-15.md §3〜§4。R90 の vwapClearance と同じ形で入れる
+(stop_logic.vwap_clearance と msnr_gate._apply_vwap_clearance を読んでから始める)。
+
+1. liquidity_pools.py(純関数):
+   pools(bars, levels, price, tol, noise) → [{price, kind, label, barT, ageBars, equalCount, swept}]
+     kind: SWING_HIGH / SWING_LOW(msnr_gate.swing_liquidity をそのまま呼ぶ。再実装しない)、
+           SESSION(levels のラベル Asia/London/New York High|Low)、VA_EDGE(C:/P: VAH|VAL)、
+           PD_EXTREME(PDH / PDL / Previous Day High|Low)。ラベルの正規表現は msnr_gate の既存に合わせる。
+     equalCount: 同じ側の極値が tol 以内に何本並ぶか(EQH / EQL の厚み)。
+   stop_pool_audit(side, entry, stop, pools, noise, rule) →
+     {between, beyondWithinN, nearestBeyond, inside025N, required, applied, reason}
+     required = 最寄りの外側プールの向こう clearN×N(stop_logic.outward_tick で不利側へ丸める)。
+     プールが無い / withinN×N より遠い / SL が既に向こう側なら required は null、reason は
+     NO_POOL / POOL_FAR_FROM_STOP / STOP_ALREADY_BEYOND_POOL / POOLS_MISSING(levels も bars も無い)。
+2. execution_contract.json に stopLogic.poolClearance を足す:
+     {"mode": "SHADOW", "withinN": 1.0, "clearN": 0.25,
+      "kinds": ["SWING_HIGH","SWING_LOW","SESSION","VA_EDGE","PD_EXTREME"], "models": [4 モデル], "_note": ...}
+   stop_logic.load_policy に節の検証を足す(壊れていればこの節だけ OFF。他の節に影響しない)。
+3. msnr_gate._candidate_for_chain で _apply_vwap_clearance の直後に同じ形で適用する:
+   OFF    = 何もしない。出力は現行とバイト一致(ゴールデンテストで固定)。
+   SHADOW = 候補に poolStop(compact な監査)を記録し、記録専用タグ STOP_POOL_WITHIN_1N /
+            POOL_BETWEEN_ENTRY_STOP を evidence に足す。SL・score・grade・decisionId は動かさない。
+   LIVE   = SL を required に置換し、タグ POOL_STOP_CLEARED。60pt 上限・R:R が壊れれば候補は WATCH
+            (SL を内側へ縮めない)。decisionId は最終 SL で決まる(R90 と同じ)。
+   select_primary の返り値に poolStop を載せる(vwapStop と同じ compact 形)。
+4. 指値の SL 再検査(SHADOW のみ): stopLogic.restingStopRecheck
+     {"mode": "SHADOW", "minN": 1.0, "sessionOpen": {"minutes": 30, "opensEt": ["09:30", "03:00"]}}
+   純関数 stop_logic.resting_stop_recheck(side, entry, stop, bars_now, at_iso, rule) →
+     {noiseNow, noiseSessionOpen, distPt, stale, reason}。noiseSessionOpen は寄付きから minutes 以内なら
+     max(直前 12 本の中央値, 寄付き以降の確定足のレンジ中央値)、それ以外は noiseNow。
+   autotrade_engine は ENTRY_RESTING を保持している周期にこれを評価し、stale なら台帳へ
+   RESTING_STOP_STALE(action=RESTING_RECHECK、plan を持たない、同じ key・同じ理由につき 1 回)を
+   書くだけ。取消は送らない(LIVE の配線は K-2 の結果を見てから別 PR)。
+5. msnr_gate.feature_tags に記録専用タグ LEVEL_CHOPPED_3 を足す(直前 20 本の終値がレベルを 3 回以上横断)。
+6. tests/test_r103_liquidity_pools.py: fixture の 4 件で
+   22:38 → beyondWithinN に 29447.00(SWING_HIGH と VA_EDGE)、required = 29447 + 0.25N の不利側 tick
+   21:20 → beyondWithinN に 29388.50、between に 29402.25
+   16:49 / 21:34 → beyondWithinN は空、between は非空
+   restingStopRecheck: 22:38 のケースを 22:36 JST 時点(22:30 / 22:33 の足を含む bars)で評価すると stale=true
+   OFF のとき msnr_gate.evaluate の出力が現行とバイト一致(fixture から bundle 相当を組んで固定)。
+
+完了条件: 既定 SHADOW で判定・SL・decisionId が現行と同一(増えるのはタグと監査キーだけ)。run_all.py 緑。
+やらないこと: 既定を LIVE にすること。modelGate(TURTLE 停止)を触ること。新モデルを足すこと。
+```
+
+**K-2(Devin。B-0 の corpus のあと)**:
+
+```text
+タスク R103-2: R103-1 の節を再生で比べる。
+
+前提: corpus/(R93-0 のエクスポート)。無ければ tests/fixtures/r103 だけで配線を完成させ、PR に
+「corpus 待ち」と書く。約定規則は replay_rules.py(R93-1)があればそれ、無ければ
+replay_stop_logic.py の simulate_setup をそのまま使う(規則を第 3 の場所に書かない)。
+
+変種(全部 BASE=現行契約との比較。結論は逐次=1 建玉ずつの数え方で語る):
+  1. poolClearance LIVE(withinN 1.0 / clearN 0.25)
+  2. 1 の kinds を SWING だけ / SESSION+VA だけ に絞った版
+  3. 「外側 1N 以内にプールがあるセットアップは見送る」(SL を動かさず WATCH)
+  4. restingStopRecheck LIVE(stale で取消。取消後は同じ周期で再評価しない)
+  5. 1 + 4 の合成
+  6. 探索: BREAKER の「掃引後に入る」型。break 後に SL 側の最寄りプールを極値が抜け、レベル側へ
+     引け戻した足があって初めて候補化。建値はレベル、SL は掃引極値 + 緩衝。3 分足では足の中の順序が
+     見えないので、この行には必ず「楽観側」の印を付ける。
+
+出力: docs/reports/REPLAY_R103_<日付>.md。各変種に N / 勝率 / 粗 PF / 平均 R / 合計 R /
+ブートストラップ 95% 区間 / 前半 70% と後半 30% の分割 / 損切りの huntClass 内訳(R103-0)。
+N<200 の行は PF を結論にしない旨を機械的に注記。時間分割で反転する変種は「不安定」の印。
+別表: 09-04〜09-15 の実トレード(cases と corpus から再構成できる分)に変種 1・3・4 を当てた
+1 件ずつの結果(entry_depth.py --trades と同じ形)。
+
+やらないこと: 契約の値を変える PR。1 分足の順序を仮定して楽観側に約定させること。
+```
+
+**【人】がやること**(Devin の外):
+- B-0 の corpus export(監視窓の外か、ループを止めているとき)。K-2 はこれが無いと fixture 止まり。
+- **1 分足の取得**: `tv_fetch` に 1 分足(`data_get_ohlcv` を pane 1 で解像度 1・240 本)を足し、
+  `tv_snapshot` の optional `bars1m.json`(`tv_snapshot.py:89`)を埋める。実機(TradingView Desktop)が
+  要るので監視 PC の Claude Code セッションで行う。これが入るまで「掃引後に入る」型は再生できても信用しない。
+- K-1 の節を LIVE に倒す判断(K-2 の逐次表を見てから。FLAT・primary なしのときに)。
+- R86 `entryDepth.mode` の再判断(証拠資料 §5: 09-16 の再生で VP80 0.25N の差が負に転じた)。
 
 ---
 
