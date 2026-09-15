@@ -65,6 +65,14 @@ DEFAULT_POOL = {"mode": "OFF", "withinN": 1.0, "clearN": 0.25,
                 "kinds": list(POOL_KINDS), "models": list(ALL_MODELS)}
 DEFAULT_RESTING = {"mode": "OFF", "minN": 1.0,
                    "sessionOpen": {"minutes": 30, "opensEt": ["09:30", "03:00"]}}
+# ---- R103-3: 掃引後に入る(SL の外側 poolWithinN×N 以内にプールがある候補だけ、掃引→奪還を待つ)
+DEFAULT_SWEEP = {"mode": "OFF", "poolWithinN": 1.0, "sweepStopN": 0.25, "maxAgeBars": 3,
+                 "reclaimBars": 2, "kinds": list(POOL_KINDS),
+                 "models": ["BREAKER_CONTINUATION", "VP80_REVERSION"]}
+# ---- R103-3: 掃引後に入る(SL の外側 poolWithinN×N 以内にプールがある候補だけ、掃引→奪還を待つ)
+DEFAULT_SWEEP = {"mode": "OFF", "poolWithinN": 1.0, "sweepStopN": 0.25, "maxAgeBars": 3,
+                 "reclaimBars": 2, "kinds": list(POOL_KINDS),
+                 "models": ["BREAKER_CONTINUATION", "VP80_REVERSION"]}
 
 
 def default_policy() -> Dict[str, Any]:
@@ -72,7 +80,9 @@ def default_policy() -> Dict[str, Any]:
             "marketStopGuard": dict(DEFAULT_MARKET), "flipOrigin": dict(DEFAULT_FLIP),
             "poolClearance": dict(DEFAULT_POOL),
             "restingStopRecheck": {"mode": "OFF", "minN": 1.0,
-                                   "sessionOpen": dict(DEFAULT_RESTING["sessionOpen"])}}
+                                   "sessionOpen": dict(DEFAULT_RESTING["sessionOpen"])},
+            "sweepGate": {**DEFAULT_SWEEP, "kinds": list(POOL_KINDS),
+                          "models": list(DEFAULT_SWEEP["models"])}}
 
 
 # ---------------------------------------------------------------- 数値ユーティリティ
@@ -200,6 +210,30 @@ def load_policy(contract: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             policy["restingStopRecheck"] = {
                 "mode": mode, "minN": min_n,
                 "sessionOpen": {"minutes": int(minutes), "opensEt": list(dict.fromkeys(opens))}}
+
+    # R103-3: 掃引ゲート。ここが壊れても他の節は動かさない。
+    sweep = raw.get("sweepGate")
+    if isinstance(sweep, dict):
+        mode = _mode(sweep.get("mode"), MODES3)
+        within = finite(sweep.get("poolWithinN", DEFAULT_SWEEP["poolWithinN"]))
+        stop_n = finite(sweep.get("sweepStopN", DEFAULT_SWEEP["sweepStopN"]))
+        age = sweep.get("maxAgeBars", DEFAULT_SWEEP["maxAgeBars"])
+        reclaim = sweep.get("reclaimBars", DEFAULT_SWEEP["reclaimBars"])
+        kinds = sweep.get("kinds", list(POOL_KINDS))
+        models = sweep.get("models", list(DEFAULT_SWEEP["models"]))
+        ok = (mode is not None and within is not None and stop_n is not None
+              and 0 < within <= 3.0 and 0 <= stop_n <= 2.0
+              and isinstance(age, int) and not isinstance(age, bool) and 0 <= age <= 20
+              and isinstance(reclaim, int) and not isinstance(reclaim, bool) and 1 <= reclaim <= 5
+              and isinstance(kinds, list) and kinds
+              and all(isinstance(k, str) and k in POOL_KINDS for k in kinds)
+              and isinstance(models, list) and models
+              and all(isinstance(m, str) and m in ALL_MODELS for m in models))
+        if ok:
+            policy["sweepGate"] = {"mode": mode, "poolWithinN": within, "sweepStopN": stop_n,
+                                   "maxAgeBars": int(age), "reclaimBars": int(reclaim),
+                                   "kinds": list(dict.fromkeys(kinds)),
+                                   "models": list(dict.fromkeys(models))}
     return policy
 
 

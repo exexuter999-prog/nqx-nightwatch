@@ -1632,6 +1632,29 @@ def _note_resting_stop_stale(records: List[Dict[str, Any]], plan: Dict[str, Any]
         pass                                     # 記録できなくても指値の扱いは変わらない
 
 
+RESTING_STOP_CANCEL = "RESTING_STOP_CANCEL"
+
+
+def _resting_cancel_eligible(plan: Dict[str, Any], order: Optional[Dict[str, Any]]) -> Optional[str]:
+    """R103-3: 指値取消の身元検査(R52 と同じ)。取消してよければ None、駄目なら理由。
+
+    取消は flatten(口座の未約定を全部消す)なので、**生きている親行が全部自分の注文 ID** の
+    ときだけ。identity の無い残骸や手動注文が同居している状態では触らない。
+    """
+    ours = {str(row.get("orderId")) for row in (plan.get("routeSnapshot") or [])
+            if isinstance(row, dict) and str(row.get("state") or "").upper() == "ACCEPTED"
+            and row.get("orderId")}
+    if not ours:
+        return "NO_BOUND_ORDER_IDS"
+    active_rows = [row for row in ((order or {}).get("activeOrders") or []) if isinstance(row, dict)]
+    parents = [row for row in active_rows if not str(row.get("parentId") or "").strip()]
+    if not parents:
+        return "NO_LIVE_PARENT_ORDERS"
+    if any(str(row.get("orderId")) not in ours for row in parents):
+        return "FOREIGN_PARENT_ORDER"
+    return None
+
+
 def _command_for_modify(plan: Dict[str, Any], action: Dict[str, Any],
                         generation: str, claim: Optional[Dict[str, Any]] = None,
                         account: Optional[str] = None,
@@ -4297,6 +4320,56 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
             verdict = _resting_stop_recheck(accepted_plan, bundle)
             if isinstance(verdict, dict) and verdict.get("stale"):
                 _note_resting_stop_stale(records, accepted_plan, verdict, ledger_path)
+                # R103-3(LIVE): 指値を取り消す。R52 の ENTRY_STALE_CANCEL と同じ経路(flatten →
+                # 再照会で FLAT + 注文非 blocking → ENTRY_HALTED → 同じ周期で startup recovery)。
+                # 身元検査(親行が全部自分の注文 ID)を通らなければ触らない。KILL 中は KILL が先。
+                if (str(verdict.get("mode") or "") == "LIVE" and not kill_requested
+                        and open_qty <= 0
+                        and _truthy(_setting("NQX_RESTING_STOP_CANCEL", cfg, "1"))):
+                    ineligible = _resting_cancel_eligible(accepted_plan, order)
+                    stale_key = _plan_entry_key(accepted_plan) or str(accepted_record.get("key") or "")
+                    stale_reason = (f"resting stop stale ({verdict.get('reason')}: SL {verdict.get('distPt')}pt"
+                                    f" < {verdict.get('minPt')}pt = minN x noise {verdict.get('noiseSessionOpen')})")
+                    if ineligible:
+                        return [f"autotrade hold: {stale_reason}; cancel skipped ({ineligible})"]
+                    ok, detail = _execute_action(_command_for_flatten(target_account or None), live, execute)
+                    if not ok:
+                        if live:
+                            _append_ledger({"key": stale_key, "entryKey": stale_key, "status": "HALT",
+                                            "action": RESTING_STOP_CANCEL, "reason": detail,
+                                            "plan": accepted_plan}, ledger_path)
+                        return [f"AUTOTRADE HALT: resting stop cancel failed ({stale_reason}): {detail}"]
+                    if not live:
+                        return [f"autotrade proposal {RESTING_STOP_CANCEL} ({stale_reason}): {detail}"]
+                    verified, verify_detail = _verify_after_action(query, symbol, "FLATTEN")
+                    if verified:
+                        try:
+                            checked_order = broker_order_query(symbol)
+                        except Exception as exc:  # noqa: BLE001
+                            checked_order = {"verified": False, "detail": f"{type(exc).__name__}: {exc}"}
+                        checked_state = str((checked_order or {}).get("state") or "UNKNOWN").upper()
+                        if (not isinstance(checked_order, dict) or checked_order.get("verified") is not True
+                                or checked_state in set(execution_contract.CONTRACT["blockingOrderStates"])):
+                            verified = False
+                            verify_detail = f"post-cancel broker order unverified/blocking ({checked_state})"
+                    if not verified:
+                        _append_ledger({"key": stale_key, "entryKey": stale_key, "status": "HALT",
+                                        "action": RESTING_STOP_CANCEL, "reason": verify_detail,
+                                        "plan": accepted_plan}, ledger_path)
+                        return [f"AUTOTRADE HALT: {verify_detail}"]
+                    _append_ledger({"key": stale_key, "entryKey": stale_key, "status": "ENTRY_HALTED",
+                                    "action": RESTING_STOP_CANCEL, "plan": accepted_plan,
+                                    "reason": stale_reason, "result": detail, "recheck": verdict}, ledger_path)
+                    try:
+                        settle = float(_setting("NQX_STALE_CANCEL_SETTLE_SEC", cfg, "3"))
+                    except (TypeError, ValueError):
+                        settle = 3.0
+                    if settle > 0:
+                        time.sleep(settle)
+                    return [f"autotrade resting entry canceled: {stale_reason}"] + _reconcile_one(
+                        bundle, state_ok, cfg, broker_query, runner, ledger_path, now,
+                        broker_order_query, state_query, claim_entry, claim_management,
+                        recover_entry, recover_management)
         return [f"autotrade hold: {accepted_record.get('status')} awaiting verified fill ({order_state})"]
 
     # Only FLAT new ENTRY depends on a published and presently sealed cycle.

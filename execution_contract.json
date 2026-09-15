@@ -205,6 +205,26 @@
           "03:00"
         ]
       }
+    },
+    "sweepGate": {
+      "_note": "R103-3(2026-09-16, docs/R103_3_SWEEP_GATE.md): 掃引後に入る。元の SL の外側 poolWithinN×N 以内に未回収プールがある候補(= 09-04〜09-15 の実測で勝ち 0/7・負け 6/12 を分けた幾何)だけ、レベルでの初回タッチでは建てず、そのプールを極値が抜けて内側で引けた(奪還)確定足を待つ。通れば SL は掃引極値の向こう sweepStopN×N(不利側 tick)。maxAgeBars を過ぎた奪還は使わない(STALE)。SHADOW は記録タグ(SWEEP_GATE_WOULD_WAIT / WOULD_PASS)と監査 sweepGate だけで、SL・decisionId は動かない。LIVE は PENDING/STALE の候補を WATCH(hardBlockers SWEEP_PENDING / SWEEP_STALE)にし、PASSED は SL を置換(decisionId も変わる)。戻すのは mode の 1 値。",
+      "_modeNote": "2026-09-16: 再生 1,260 本で「掃引後に通った」周期が 0(掃引→奪還の頃には候補が別の幾何になる)。実効は『プールが SL の外側 1N 以内の候補の見送り』で、POOL 単独より逐次 ΣR が低い(+16.5 vs +19.1)。記録のみ(SHADOW)。掃引を起点にする候補は R103-2 変種 6(TURTLE 再有効化 + R88)。",
+      "mode": "SHADOW",
+      "poolWithinN": 1.0,
+      "sweepStopN": 0.25,
+      "maxAgeBars": 3,
+      "reclaimBars": 2,
+      "kinds": [
+        "SWING_HIGH",
+        "SWING_LOW",
+        "SESSION",
+        "VA_EDGE",
+        "PD_EXTREME"
+      ],
+      "models": [
+        "BREAKER_CONTINUATION",
+        "VP80_REVERSION"
+      ]
     }
   },
   "modelGate": {

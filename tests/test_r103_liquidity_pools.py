@@ -196,11 +196,12 @@ check("kinds で種別を絞れる(VA_EDGE だけ外すと 1 本になる)",
 
 section("3. execution_contract.json と load_policy")
 policy = stop_logic.load_policy()
-check("poolClearance の既定は SHADOW", policy["poolClearance"]["mode"] == "SHADOW", policy["poolClearance"])
-check("restingStopRecheck の既定は SHADOW", policy["restingStopRecheck"]["mode"] == "SHADOW",
+check("poolClearance は契約で有効(出荷時 SHADOW。LIVE へ倒すのは運用者、R103-3 §0)",
+      policy["poolClearance"]["mode"] in ("SHADOW", "LIVE"), policy["poolClearance"])
+check("restingStopRecheck は契約で有効(SHADOW か LIVE)", policy["restingStopRecheck"]["mode"] in ("SHADOW", "LIVE"),
       policy["restingStopRecheck"])
-check("既定は LIVE ではない", policy["poolClearance"]["mode"] != "LIVE"
-      and policy["restingStopRecheck"]["mode"] != "LIVE")
+check("コード側の既定(default_policy)は OFF", stop_logic.default_policy()["poolClearance"]["mode"] == "OFF"
+      and stop_logic.default_policy()["restingStopRecheck"]["mode"] == "OFF")
 
 broken = {"stopLogic": {"vwapClearance": {"mode": "LIVE"}, "marketStopGuard": {"mode": "LIVE"},
                         "poolClearance": {"mode": "LIVE", "withinN": -1, "kinds": ["NOPE"]},
