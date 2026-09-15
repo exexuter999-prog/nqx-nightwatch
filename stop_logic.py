@@ -36,9 +36,12 @@ import io
 import json
 import math
 import os
+import re
 import statistics
 import sys
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONTRACT_PATH = os.path.join(BASE, "execution_contract.json")
@@ -54,10 +57,22 @@ DEFAULT_VWAP = {"mode": "OFF", "withinN": 1.0, "clearN": 0.25, "models": list(AL
 DEFAULT_MARKET = {"mode": "OFF", "minN": 1.0}
 DEFAULT_FLIP = {"mode": "OFF", "maxBarsBack": 5}
 
+# ---- R103-1: SL 側の流動性プール(liquidity_pools.py が使う語彙と既定値)
+VERSION_R103 = "R103-POOL-CLEARANCE-1"
+BAR_SEC = 180
+POOL_KINDS = ("SWING_HIGH", "SWING_LOW", "SESSION", "VA_EDGE", "PD_EXTREME")
+DEFAULT_POOL = {"mode": "OFF", "withinN": 1.0, "clearN": 0.25,
+                "kinds": list(POOL_KINDS), "models": list(ALL_MODELS)}
+DEFAULT_RESTING = {"mode": "OFF", "minN": 1.0,
+                   "sessionOpen": {"minutes": 30, "opensEt": ["09:30", "03:00"]}}
+
 
 def default_policy() -> Dict[str, Any]:
     return {"version": VERSION, "vwapClearance": dict(DEFAULT_VWAP),
-            "marketStopGuard": dict(DEFAULT_MARKET), "flipOrigin": dict(DEFAULT_FLIP)}
+            "marketStopGuard": dict(DEFAULT_MARKET), "flipOrigin": dict(DEFAULT_FLIP),
+            "poolClearance": dict(DEFAULT_POOL),
+            "restingStopRecheck": {"mode": "OFF", "minN": 1.0,
+                                   "sessionOpen": dict(DEFAULT_RESTING["sessionOpen"])}}
 
 
 # ---------------------------------------------------------------- 数値ユーティリティ
@@ -93,6 +108,15 @@ def outward_tick(value: float, side: str) -> float:
 def _mode(raw: Any, allowed) -> Optional[str]:
     mode = str(raw or "OFF").strip().upper()
     return mode if mode in allowed else None
+
+
+def _hhmm(raw: Any) -> Optional[tuple]:
+    """``"09:30"`` → ``(9, 30)``。形式が違えば None(推測で補わない)。"""
+    text = str(raw or "").strip()
+    if not re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return None
+    hour, minute = (int(part) for part in text.split(":"))
+    return (hour, minute) if 0 <= hour <= 23 and 0 <= minute <= 59 else None
 
 
 def load_policy(contract: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -140,6 +164,42 @@ def load_policy(contract: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if (mode is not None and isinstance(back, int) and not isinstance(back, bool)
                 and 1 <= back <= 20):
             policy["flipOrigin"] = {"mode": mode, "maxBarsBack": back}
+
+    # R103-1: 節ごとに独立して検証する。ここが壊れても上の 3 節は動かさない。
+    pool = raw.get("poolClearance")
+    if isinstance(pool, dict):
+        mode = _mode(pool.get("mode"), MODES3)
+        within = finite(pool.get("withinN", DEFAULT_POOL["withinN"]))
+        clear = finite(pool.get("clearN", DEFAULT_POOL["clearN"]))
+        kinds = pool.get("kinds", list(POOL_KINDS))
+        models = pool.get("models", list(ALL_MODELS))
+        ok = (mode is not None and within is not None and clear is not None
+              and 0 < within <= 3.0 and 0 < clear <= 1.0
+              and isinstance(kinds, list) and kinds
+              and all(isinstance(k, str) and k in POOL_KINDS for k in kinds)
+              and isinstance(models, list) and models
+              and all(isinstance(m, str) and m in ALL_MODELS for m in models))
+        if ok:
+            policy["poolClearance"] = {"mode": mode, "withinN": within, "clearN": clear,
+                                       "kinds": list(dict.fromkeys(kinds)),
+                                       "models": list(dict.fromkeys(models))}
+
+    resting = raw.get("restingStopRecheck")
+    if isinstance(resting, dict):
+        mode = _mode(resting.get("mode"), MODES3)
+        min_n = finite(resting.get("minN", DEFAULT_RESTING["minN"]))
+        session = resting.get("sessionOpen", DEFAULT_RESTING["sessionOpen"])
+        minutes = (session or {}).get("minutes") if isinstance(session, dict) else None
+        opens = (session or {}).get("opensEt") if isinstance(session, dict) else None
+        ok = (mode is not None and min_n is not None and 0 < min_n <= 3.0
+              and isinstance(minutes, int) and not isinstance(minutes, bool)
+              and 1 <= minutes <= 240
+              and isinstance(opens, list) and opens
+              and all(isinstance(t, str) and _hhmm(t) is not None for t in opens))
+        if ok:
+            policy["restingStopRecheck"] = {
+                "mode": mode, "minN": min_n,
+                "sessionOpen": {"minutes": int(minutes), "opensEt": list(dict.fromkeys(opens))}}
     return policy
 
 
@@ -237,6 +297,103 @@ def market_stop_guard(side: str, stop: Any, price: Any, noise: Any,
     else:
         verdict["reason"] = "OK"
     return verdict
+
+
+# ---------------------------------------------------------------- R103-1: 指値の SL 再検査
+
+ET_ZONE = ZoneInfo("America/New_York")
+RESTING_STALE_REASON = "RESTING_STOP_BELOW_MIN_N"
+
+
+def _range_median(rows: List[Dict[str, Any]]) -> Optional[float]:
+    ranges = []
+    for bar in rows:
+        high, low = finite(bar.get("h", bar.get("high"))), finite(bar.get("l", bar.get("low")))
+        if high is None or low is None or high < low:
+            continue
+        ranges.append(high - low)
+    if not ranges:
+        return None
+    value = statistics.median(ranges)
+    return value if value > 0 else None
+
+
+def resting_stop_recheck(side: str, entry: Any, stop: Any, bars_now: Any, at_iso: Any,
+                         rule: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """指値を置いたままの SL が、**今のノイズ**に対して短くなっていないか(純粋関数)。
+
+    指値は数十分置かれる。武装時点で 1N あった SL 距離は、寄付きでレンジが倍になれば
+    そのまま「刈られに行く距離」へ変わる(2026-09-15 22:38 の SELL は 18.5pt = 武装時 1.20N、
+    09:30 ET 以降のレンジ中央値 48.25pt では 0.38N)。
+
+    ``noiseSessionOpen`` は寄付き(``sessionOpen.opensEt``)から ``minutes`` 以内なら
+    ``max(直前 12 本の中央値, 寄付き以降の確定足のレンジ中央値)``、それ以外は ``noiseNow``。
+    入力が足りなければ推測せず ``stale=False`` と理由だけを返す(記録専用)。
+    """
+    rule = rule or DEFAULT_RESTING
+    out: Dict[str, Any] = {"version": VERSION_R103, "mode": rule.get("mode", "OFF"),
+                           "noiseNow": None, "noiseSessionOpen": None, "distPt": None,
+                           "stale": False, "reason": None}
+    side = str(side or "").upper()
+    entry_f, stop_f = finite(entry), finite(stop)
+    if side not in {"BUY", "SELL"} or entry_f is None or stop_f is None:
+        out["reason"] = "GEOMETRY_MISSING"
+        return out
+    sgn = 1.0 if side == "BUY" else -1.0
+    if (entry_f - stop_f) * sgn <= 0:
+        out["reason"] = "STOP_ON_WRONG_SIDE"
+        return out
+    out["distPt"] = round(abs(entry_f - stop_f), 2)
+    try:
+        at = datetime.fromisoformat(str(at_iso))
+    except (TypeError, ValueError):
+        at = None
+    if at is None or at.tzinfo is None:
+        out["reason"] = "AT_TIME_MISSING"
+        return out
+    rows = [bar for bar in (bars_now or []) if isinstance(bar, dict)]
+    closed = []
+    for bar in rows:
+        t = finite(bar.get("t", bar.get("time")))
+        if t is None or t + BAR_SEC > at.timestamp() + 1e-9:
+            continue
+        closed.append(dict(bar, t=t))
+    closed.sort(key=lambda bar: bar["t"])
+    if len(closed) < NOISE_BARS:
+        out["reason"] = "NOISE_FLOOR_MISSING"
+        return out
+    noise_now = _range_median(closed[-NOISE_BARS:])
+    if noise_now is None:
+        out["reason"] = "NOISE_FLOOR_MISSING"
+        return out
+    out["noiseNow"] = round(noise_now, 2)
+
+    session = rule.get("sessionOpen") if isinstance(rule.get("sessionOpen"), dict) else {}
+    minutes = session.get("minutes", DEFAULT_RESTING["sessionOpen"]["minutes"])
+    minutes = minutes if isinstance(minutes, int) and not isinstance(minutes, bool) else 30
+    at_et = at.astimezone(ET_ZONE)
+    noise = noise_now
+    for text in (session.get("opensEt") or DEFAULT_RESTING["sessionOpen"]["opensEt"]):
+        hhmm = _hhmm(text)
+        if hhmm is None:
+            continue
+        open_et = at_et.replace(hour=hhmm[0], minute=hhmm[1], second=0, microsecond=0)
+        if not (timedelta(0) <= at_et - open_et < timedelta(minutes=minutes)):
+            continue
+        since = [bar for bar in closed if bar["t"] >= open_et.timestamp()]
+        opened = _range_median(since)
+        if opened is not None and opened > noise:
+            noise = opened
+        out["sessionOpenEt"] = text
+        out["barsSinceOpen"] = len(since)
+        break
+    out["noiseSessionOpen"] = round(noise, 2)
+    min_pt = round(float(rule.get("minN", DEFAULT_RESTING["minN"])) * noise, 2)
+    out["minPt"] = min_pt
+    out["distN"] = round(out["distPt"] / noise, 2)
+    out["stale"] = bool(out["distPt"] < min_pt - 1e-9)
+    out["reason"] = RESTING_STALE_REASON if out["stale"] else "OK"
+    return out
 
 
 def noise_from_bundle(bundle: Dict[str, Any]) -> Optional[float]:

@@ -174,6 +174,37 @@
     "flipOrigin": {
       "mode": "OFF",
       "maxBarsBack": 5
+    },
+    "poolClearance": {
+      "_note": "R103-1(2026-09-15, docs/R103_1_LIQUIDITY_POOL_STOP.md): SL の外側 withinN×N 以内に未回収の流動性プール(スイング高安 / セッション高安 / VAH・VAL / 前日高安)があれば、SL をそのプールの向こう clearN×N へ逃がす。SHADOW は候補に poolStop の監査と記録専用タグを足すだけで、SL・score・grade・decisionId を動かさない。LIVE にすると SL が置き換わり(60pt 上限・R:R が壊れれば WATCH)decisionId も変わる。戻すのは mode の 1 値(OFF で監査ごと止まる)。",
+      "mode": "SHADOW",
+      "withinN": 1.0,
+      "clearN": 0.25,
+      "kinds": [
+        "SWING_HIGH",
+        "SWING_LOW",
+        "SESSION",
+        "VA_EDGE",
+        "PD_EXTREME"
+      ],
+      "models": [
+        "VP80_REVERSION",
+        "TURTLE_SOUP_REVERSAL",
+        "BREAKER_CONTINUATION",
+        "OTE_FVG_PULLBACK"
+      ]
+    },
+    "restingStopRecheck": {
+      "_note": "R103-1: 指値(ENTRY_RESTING)を保持している周期に、建値→SL の距離が今のノイズ床 minN×N を割っていないか再検査する。寄付き(opensEt)から minutes 以内は max(直前 12 本の中央値, 寄付き以降の確定足の中央値)を使う。SHADOW は台帳へ RESTING_STOP_STALE を 1 行書くだけで、取消も変更も送らない。戻すのは mode の 1 値。",
+      "mode": "SHADOW",
+      "minN": 1.0,
+      "sessionOpen": {
+        "minutes": 30,
+        "opensEt": [
+          "09:30",
+          "03:00"
+        ]
+      }
     }
   },
   "modelGate": {

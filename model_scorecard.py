@@ -19,9 +19,15 @@ scenarioId が付いたことで decision → 発注 → 決済の紐付けが�
 累積台帳: `.secrets/model_scorecard.jsonl`(resultId ごとに1行、追記のみ)。
 Durable Object の resultLog は直近50件しか持たないため、長期の正本はここ。
 
+R103-0: 行に `excursion`(MAE/MFE・SL 抜け幅・決済後の TP1 到達・huntClass)を足した。
+計算は `excursion_metrics.classify`(純関数)。確定 3 分足は呼び出し側(trade_journal)が
+注入し、無ければ result.chart の足を使う。足が無ければ `excursion` は null(推測しない)。
+
     python model_scorecard.py            # 集計テーブルを表示
     python model_scorecard.py --json     # JSON
     python model_scorecard.py --sync     # DO の recentResults を取り込んでから表示
+    python model_scorecard.py --excursions                    # 刈られ方の内訳
+    python model_scorecard.py --backfill-excursions <bars_dir># 既存行を再計算して追記
 """
 from __future__ import annotations
 
@@ -32,6 +38,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
+
+import excursion_metrics  # noqa: E402
+
 SCORECARD_FILE = os.path.join(BASE, ".secrets", "model_scorecard.jsonl")
 AUTOTRADE_LEDGER = os.path.join(BASE, ".secrets", "autotrade_ledger.jsonl")
 
@@ -74,9 +84,15 @@ def plan_index(ledger_path: str = AUTOTRADE_LEDGER) -> Dict[str, Dict[str, Any]]
                 scenario_id = str(plan.get("scenarioId") or "")
                 if not scenario_id:
                     continue
+                targets = plan.get("targets")
+                tp1 = plan.get("tp1")
+                if tp1 is None and isinstance(targets, (list, tuple)) and targets:
+                    tp1 = targets[0]
                 index[scenario_id] = {
                     "model": plan.get("model") or None,
                     "grade": plan.get("grade") or None,
+                    # R103-0: 凍結時の TP1。決済後の TP1 到達を後から測るのに使う。
+                    "tp1": _num(tp1),
                     "evidence": [str(x) for x in (plan.get("decisionEvidence") or [])][:16],
                 }
     except OSError:
@@ -84,9 +100,46 @@ def plan_index(ledger_path: str = AUTOTRADE_LEDGER) -> Dict[str, Dict[str, Any]]
     return index
 
 
+def excursion_of(row: Dict[str, Any], bars: Any = None,
+                 tp1: Any = None, noise: Any = None) -> Optional[Dict[str, Any]]:
+    """行 1 件の刈られ方(R103-0)。足が無ければ None(推測しない)。
+
+    ``noise`` が無ければ建玉直前の確定足から後追いで出す(出所は ``noiseSource``)。
+    ``tp1`` と ``noise`` は再計算(--backfill-excursions)で使えるように結果へも残す。
+    """
+    rows = excursion_metrics.normalize_bars(bars)
+    if not rows:
+        return None
+    source = "GIVEN" if _num(noise) is not None else None
+    if source is None:
+        noise = excursion_metrics.noise_before(rows, row.get("openedAt"))
+        source = "BARS_BEFORE_ENTRY" if noise is not None else None
+    metrics = excursion_metrics.classify(row, rows, tp1=tp1, noise=noise)
+    metrics["tp1"] = _num(tp1)
+    metrics["noise"] = _num(noise)
+    metrics["noiseSource"] = source
+    metrics["bars"] = len(rows)
+    return metrics
+
+
+def _chart_inputs(result: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+    """result.chart(R57 の根拠チャート。ローカルに既にある足)から (bars, tp1, noise)。"""
+    chart = result.get("chart") if isinstance(result, dict) else None
+    if not isinstance(chart, dict):
+        return None, None, None
+    return chart.get("bars"), chart.get("tp1"), chart.get("noise")
+
+
 def classify(result: Dict[str, Any],
-             plans: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
-    """result 1件をスコアカード行へ変換する。数値が揃わなければ None。"""
+             plans: Optional[Dict[str, Dict[str, Any]]] = None,
+             *, bars: Any = None, tp1: Any = None,
+             noise: Any = None) -> Optional[Dict[str, Any]]:
+    """result 1件をスコアカード行へ変換する。数値が揃わなければ None。
+
+    R103-0: ``bars`` / ``tp1`` / ``noise`` を渡すと行に ``excursion`` が載る。欠けた
+    項目は**項目ごとに**補う —— 足は result.chart、TP1 は凍結プラン(plans)、noise は
+    建玉直前の確定足。どれも無ければその項目は None(推測で埋めない)。
+    """
     if not isinstance(result, dict):
         return None
     result_id = str(result.get("resultId") or "")
@@ -122,7 +175,7 @@ def classify(result: Dict[str, Any],
     move_pt = abs(exit_price - entry)
     outcome = ("FLAT" if move_pt < COST_FLOOR_PT
                else ("WIN" if net > 0 else "LOSS"))
-    return {
+    row = {
         "resultId": result_id,
         "closedAt": result.get("closedAt"),
         # R57: 建玉時刻も残す(日誌の保有時間・MAE/MFE の区間に要る。無ければ None)。
@@ -147,6 +200,15 @@ def classify(result: Dict[str, Any],
         # 後から実測するための分離キー(重み付けは N が貯まるまでしない)。
         "evidenceTags": evidence_tags,
     }
+    # R103-0: 刈られ方の計測。足が無ければ None。TP1 は凍結プランから引く
+    # (これが無いと決済後の TP1 到達が測れず、STOP_HUNT が一度も出ない)。
+    chart_bars, chart_tp1, chart_noise = _chart_inputs(result)
+    bars = bars if bars is not None else chart_bars
+    tp1 = tp1 if tp1 is not None else (chart_tp1 if chart_tp1 is not None
+                                       else attributed.get("tp1"))
+    noise = noise if noise is not None else chart_noise
+    row["excursion"] = excursion_of(row, bars=bars, tp1=tp1, noise=noise)
+    return row
 
 
 # ---------------------------------------------------------------- 台帳
@@ -177,13 +239,17 @@ def load_rows(path: str = SCORECARD_FILE) -> List[Dict[str, Any]]:
 
 
 def record(result: Dict[str, Any], path: str = SCORECARD_FILE,
-           plans: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+           plans: Optional[Dict[str, Dict[str, Any]]] = None,
+           *, bars: Any = None, tp1: Any = None,
+           noise: Any = None) -> Optional[Dict[str, Any]]:
     """publish 済み result を1件、台帳へ追記する(重複は resultId で排除)。
 
     どこで失敗しても例外を出さない — 記録の失敗で決済経路を巻き込まない。
+    ``bars`` / ``tp1`` / ``noise`` は R103-0 の計測用(注入。無ければ result.chart)。
     """
     try:
-        row = classify(result, plans=plans if plans is not None else plan_index())
+        row = classify(result, plans=plans if plans is not None else plan_index(),
+                       bars=bars, tp1=tp1, noise=noise)
         if row is None:
             return None
         # R54: 同じ resultId でも金額が変われば訂正として追記する。2026-09-07 に
@@ -286,15 +352,198 @@ def summary_line(summary: Dict[str, Any]) -> str:
     return "scorecard: " + (" | ".join(parts) if parts else "no attributed results yet")
 
 
+# ---------------------------------------------------------------- 刈られ方の集計(R103-0)
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[mid], 2)
+    return round((ordered[mid - 1] + ordered[mid]) / 2.0, 2)
+
+
+def excursion_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """モデル×等級ごとの huntClass 内訳と、beyondStopPt / tp1AfterExitMin の中央値。
+
+    計測がまだ無い行(足が無い・古い行)は ``missing`` に数える。推測で埋めない。
+    """
+    def _bucket() -> Dict[str, Any]:
+        return {"n": 0, "missing": 0, "classes": {name: 0 for name in excursion_metrics.HUNT_CLASSES},
+                "unclassified": 0, "_beyond": [], "_tp1": []}
+
+    def _add(bucket: Dict[str, Any], row: Dict[str, Any]) -> None:
+        bucket["n"] += 1
+        metrics = row.get("excursion")
+        if not isinstance(metrics, dict):
+            bucket["missing"] += 1
+            return
+        hunt = metrics.get("huntClass")
+        if hunt in bucket["classes"]:
+            bucket["classes"][hunt] += 1
+        else:
+            bucket["unclassified"] += 1
+        beyond = _num(metrics.get("beyondStopPt"))
+        if beyond is not None:
+            bucket["_beyond"].append(beyond)
+        tp1 = _num(metrics.get("tp1AfterExitMin"))
+        if tp1 is not None:
+            bucket["_tp1"].append(tp1)
+
+    def _final(bucket: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "n": bucket["n"], "missing": bucket["missing"],
+            "classes": dict(bucket["classes"]), "unclassified": bucket["unclassified"],
+            "beyondStopPtMedian": _median(bucket["_beyond"]),
+            "beyondStopN": len(bucket["_beyond"]),
+            "tp1AfterExitMinMedian": _median(bucket["_tp1"]),
+            "tp1AfterExitN": len(bucket["_tp1"]),
+        }
+
+    models: Dict[str, Dict[str, Any]] = {}
+    grades: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        model = row.get("model") or "UNATTRIBUTED"
+        models.setdefault(model, _bucket())
+        _add(models[model], row)
+        grade = row.get("grade") or "?"
+        grades.setdefault((model, grade), _bucket())
+        _add(grades[(model, grade)], row)
+    return {
+        "totalResults": len(rows),
+        "models": {model: _final(bucket) for model, bucket in models.items()},
+        "byGrade": {f"{model}|{grade}": _final(bucket)
+                    for (model, grade), bucket in grades.items()},
+        "thresholds": {
+            "stopWindowMin": excursion_metrics.STOP_WINDOW_MIN,
+            "tp1WindowMin": excursion_metrics.TP1_WINDOW_MIN,
+            "favWindowMin": excursion_metrics.FAV_WINDOW_MIN,
+            "huntNoiseN": excursion_metrics.HUNT_NOISE_N,
+            "huntFavSlMult": excursion_metrics.HUNT_FAV_SL_MULT,
+            "wrongWayFavSlMult": excursion_metrics.WRONG_WAY_FAV_SL_MULT,
+        },
+    }
+
+
+def load_bars_dir(bars_dir: str) -> List[Dict[str, float]]:
+    """``<bars_dir>/*.json`` の確定 3 分足を 1 本の列にまとめる(時刻で重複排除)。
+
+    受ける形: ``{"bars": [...]}`` / ``{"bars3m": [...]}`` / 素の配列。
+    ``{t,o,h,l,c}`` でも ``[t,o,h,l,c]`` でもよい。読めないファイルは黙って飛ばす。
+    """
+    merged: Dict[float, Dict[str, float]] = {}
+    try:
+        names = sorted(n for n in os.listdir(bars_dir) if n.endswith(".json"))
+    except OSError:
+        return []
+    for name in names:
+        try:
+            with open(os.path.join(bars_dir, name), encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        raw = payload
+        if isinstance(payload, dict):
+            raw = payload.get("bars") or payload.get("bars3m") or []
+        for bar in excursion_metrics.normalize_bars(raw):
+            merged[bar["t"]] = bar
+    return [merged[t] for t in sorted(merged)]
+
+
+def backfill_excursions(bars_dir: str, path: str = SCORECARD_FILE,
+                        ledger_path: str = AUTOTRADE_LEDGER) -> Dict[str, Any]:
+    """既存行を再計算し、変わった行だけ supersedes 付きで**追記**する。
+
+    既存行は消さない・書き換えない(R54 と同じ訂正の作法)。
+    TP1 は凍結プラン(autotrade 台帳)→ 前回の行に残っている値の順で引き、
+    どちらも無ければ None のまま。noise が無い行は建玉直前の確定足から後追いで出す。
+    """
+    bars = load_bars_dir(bars_dir)
+    rows = load_rows(path)
+    plans = plan_index(ledger_path)
+    appended: List[Dict[str, Any]] = []
+    if not bars:
+        return {"bars": 0, "rows": len(rows), "appended": 0, "rowsAppended": appended}
+    for row in rows:
+        previous = row.get("excursion") if isinstance(row.get("excursion"), dict) else {}
+        plan = plans.get(str(row.get("scenarioId") or "")) or {}
+        tp1 = plan.get("tp1")
+        metrics = excursion_of(row, bars=bars,
+                               tp1=tp1 if tp1 is not None else previous.get("tp1"),
+                               noise=previous.get("noise"))
+        if metrics is None or metrics == row.get("excursion"):
+            continue
+        new_row = dict(row)
+        new_row["excursion"] = metrics
+        new_row["supersedes"] = str(row.get("recordedAt") or "")
+        new_row["recordedAt"] = datetime.now(timezone.utc).isoformat()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(new_row, ensure_ascii=False) + "\n")
+        appended.append(new_row)
+    return {"bars": len(bars), "rows": len(rows), "appended": len(appended),
+            "rowsAppended": appended}
+
+
 # ---------------------------------------------------------------- CLI
+
+def _utf8_stdout() -> None:
+    """cp932 のコンソールでも「—」で落ちないようにする(既存 main() の UnicodeEncodeError)。"""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+def _print_excursions(rows: List[Dict[str, Any]], as_json: bool) -> None:
+    summary = excursion_summary(rows)
+    if as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+    names = list(excursion_metrics.HUNT_CLASSES)
+    header = (f"{'MODEL':<24} {'GRADE':<6} {'N':>4} "
+              + " ".join(f"{name[:9]:>9}" for name in names)
+              + f" {'beyond':>8} {'tp1min':>7} {'足なし':>6}")
+    print(header)
+    print("-" * len(header))
+
+    def _line(label: str, grade: str, stats: Dict[str, Any]) -> None:
+        counts = " ".join(f"{stats['classes'][name]:>9}" for name in names)
+        beyond = "—" if stats["beyondStopPtMedian"] is None else f"{stats['beyondStopPtMedian']:.2f}"
+        tp1 = "—" if stats["tp1AfterExitMinMedian"] is None else f"{stats['tp1AfterExitMinMedian']:.0f}"
+        print(f"{label:<24} {grade:<6} {stats['n']:>4} {counts} {beyond:>8} {tp1:>7} "
+              f"{stats['missing']:>6}")
+
+    for model, stats in sorted((summary.get("models") or {}).items()):
+        _line(model, "ALL", stats)
+        for key, gstats in sorted((summary.get("byGrade") or {}).items()):
+            gmodel, grade = key.split("|", 1)
+            if gmodel == model:
+                _line("", grade, gstats)
+    print("\nbeyond = 決済後 15 分の SL 抜け幅の中央値(pt)・"
+          "tp1min = 決済後に TP1 へ届くまでの中央値(分。届いた件だけ)")
+    print("STOP_HUNT/WRONG_WAY/DEEP は損切りの分類。しきい値は excursion_metrics の docstring。")
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
+    _utf8_stdout()
     parser = argparse.ArgumentParser(description="モデル別スコアカード(表示専用)")
     parser.add_argument("--json", action="store_true", help="JSON で出力")
     parser.add_argument("--sync", action="store_true",
                         help="Durable Object の recentResults を取り込んでから集計")
+    parser.add_argument("--excursions", action="store_true",
+                        help="R103: モデル×等級ごとの huntClass 内訳と中央値を表示")
+    parser.add_argument("--backfill-excursions", metavar="BARS_DIR",
+                        help="R103: <BARS_DIR>/*.json の確定 3 分足で既存行を再計算し、"
+                             "supersedes 付きの新行を追記する(既存行は消さない)")
     args = parser.parse_args(argv)
 
     if args.sync:
@@ -305,7 +554,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"sync: {len(appended)} new result(s) ingested from server "
               f"({len(results)} visible)")
 
+    if args.backfill_excursions:
+        stats = backfill_excursions(args.backfill_excursions)
+        print(f"backfill: {stats['appended']} row(s) appended "
+              f"({stats['rows']} existing row(s), {stats['bars']} bar(s) loaded)")
+        if not stats["bars"]:
+            print("足が 1 本も読めなかった — 追記していない(推測で埋めない)")
+
     rows = load_rows()
+    if args.excursions:
+        _print_excursions(rows, args.json)
+        return 0
     summary = summarize(rows)
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))

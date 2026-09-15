@@ -1585,6 +1585,53 @@ def _note_entry_guard(records: List[Dict[str, Any]], entry_key: str, scenario: D
         pass                                     # 記録できなくても見送り自体は成立している
 
 
+RESTING_STOP_STALE = "RESTING_STOP_STALE"
+
+
+def _resting_stop_recheck(plan: Dict[str, Any], bundle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """R103-1: 指値を保持している周期の SL 再検査(純粋計算を呼ぶだけ)。
+
+    OFF または入力不足なら None。ここでは何も送らない —— 取消しの配線は K-2 の結果を
+    見てから別 PR(契約は ``stopLogic.restingStopRecheck``)。
+    """
+    try:
+        import stop_logic
+        rule = (stop_logic.load_policy() or {}).get("restingStopRecheck")
+    except Exception:  # noqa: BLE001 - 方針が読めなければ見ない(記録専用の節)
+        return None
+    if not isinstance(rule, dict) or str(rule.get("mode") or "OFF") == "OFF":
+        return None
+    snapshot = (bundle or {}).get("snapshot") if isinstance(bundle, dict) else {}
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    bars = snapshot.get("bars3m") or snapshot.get("bars") or []
+    at = (bundle or {}).get("at") or snapshot.get("at")
+    try:
+        return stop_logic.resting_stop_recheck(plan.get("side"), plan.get("entry"),
+                                               plan.get("initialStop"), bars, at, rule)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _note_resting_stop_stale(records: List[Dict[str, Any]], plan: Dict[str, Any],
+                             verdict: Dict[str, Any], ledger_path: str) -> None:
+    """stale な指値の SL を台帳へ **1 回だけ**(同じ key・同じ理由は書かない)。
+
+    行は ``plan`` を持たない(凍結プランとして拾われない)。HALT でも取消しでもない —— 監査だけ。
+    """
+    entry_key = _plan_entry_key(plan)
+    if not entry_key:
+        return
+    previous = _latest(records, entry_key, {RESTING_STOP_STALE})
+    if previous and (previous.get("recheck") or {}).get("reason") == verdict.get("reason"):
+        return
+    try:
+        _append_ledger({"key": entry_key, "entryKey": entry_key, "status": RESTING_STOP_STALE,
+                        "action": "RESTING_RECHECK", "decisionId": plan.get("decisionId"),
+                        "recheck": verdict, "reason": verdict.get("reason")}, ledger_path)
+    except OSError:
+        pass                                     # 記録できなくても指値の扱いは変わらない
+
+
 def _command_for_modify(plan: Dict[str, Any], action: Dict[str, Any],
                         generation: str, claim: Optional[Dict[str, Any]] = None,
                         account: Optional[str] = None,
@@ -4245,6 +4292,11 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
                             "status": "ENTRY_HALTED", "action": "ENTRY_TERMINAL",
                             "plan": accepted_plan, "reason": f"broker order {detail}"}, ledger_path)
             return [f"autotrade pending entry terminalized: {detail}"]
+        if accepted_record.get("status") == "ENTRY_RESTING":
+            # R103-1(SHADOW): SL が今のノイズに対して短くなっていれば台帳に 1 行だけ残す。
+            verdict = _resting_stop_recheck(accepted_plan, bundle)
+            if isinstance(verdict, dict) and verdict.get("stale"):
+                _note_resting_stop_stale(records, accepted_plan, verdict, ledger_path)
         return [f"autotrade hold: {accepted_record.get('status')} awaiting verified fill ({order_state})"]
 
     # Only FLAT new ENTRY depends on a published and presently sealed cycle.

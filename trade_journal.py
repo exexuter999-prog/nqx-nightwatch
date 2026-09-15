@@ -1168,7 +1168,7 @@ def reconcile_fills(bundle: Dict[str, Any], *, accounts: List[str],
             notes.append(f"trade journal: recorded {row.get('side')} {row.get('qty')} "
                          f"@{float(row.get('entry') or 0):,.2f} → LEDGER "
                          f"({row.get('how')} · {row.get('detail')})")
-            _scorecard(result, notes)
+            _scorecard(result, notes, bars=bars)
 
         # R54: 手数料の基準は「建玉ゼロを観測したときの realizedPnL」。建玉が
         # 残っている間は動かさない(次の決済までの差分がその往復の純額になる)。
@@ -1203,11 +1203,15 @@ def _publish(result: Dict[str, Any],
         return False, f"{type(exc).__name__}: {exc}"
 
 
-def _scorecard(result: Dict[str, Any], notes: List[str]) -> None:
-    """R48: モデル別スコアカードへも追記する(表示・台帳のみ)。失敗しても巻き込まない。"""
+def _scorecard(result: Dict[str, Any], notes: List[str],
+               bars: Optional[List[Dict[str, float]]] = None) -> None:
+    """R48: モデル別スコアカードへも追記する(表示・台帳のみ)。失敗しても巻き込まない。
+
+    R103-0: 刈られ方の計測に使う確定 3 分足を渡す(ここに既にあるもの。取り直さない)。
+    """
     try:
         import model_scorecard
-        if model_scorecard.record(result):
+        if model_scorecard.record(result, bars=bars):
             notes.append(model_scorecard.summary_line(
                 model_scorecard.summarize(model_scorecard.load_rows())))
     except Exception:                                  # noqa: BLE001
@@ -1310,13 +1314,7 @@ def reconcile(bundle: Dict[str, Any], *, accounts: List[str],
                          f"{state.get('initialQty')} → LEDGER ({detail})")
             # R48: モデル別スコアカードへも追記する(表示・台帳のみ)。
             # 失敗しても決済記録は成立している — 巻き込まない。
-            try:
-                import model_scorecard
-                if model_scorecard.record(result):
-                    notes.append(model_scorecard.summary_line(
-                        model_scorecard.summarize(model_scorecard.load_rows())))
-            except Exception:                          # noqa: BLE001
-                pass
+            _scorecard(result, notes, bars=bars)
         else:
             journal.setdefault("unresolved", []).append(state)
             notes.append(f"trade journal: NOT recorded — {detail}")
