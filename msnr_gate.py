@@ -486,8 +486,15 @@ def _apply_vwap_clearance(model, side, entry, stop, bundle, nf):
     try:
         import stop_logic
         vwap = _num(bundle, "vwap") if isinstance(bundle, dict) else None
-        if vwap is None and isinstance(bundle, dict) and isinstance(bundle.get("snapshot"), dict):
-            vwap = _num(bundle["snapshot"], "vwap")
+        snapshot_v = bundle.get("snapshot") if isinstance(bundle, dict) and isinstance(bundle.get("snapshot"), dict) else {}
+        if vwap is None and snapshot_v:
+            vwap = _num(snapshot_v, "vwap")
+        # R105: セッション VWAP が欠損付き(窓がアンカーに届かない / ループ停止中の抜け)なら
+        # 使わない。推測で埋めた VWAP に SL を寄せない。
+        if snapshot_v.get("vwapComplete") is False or (isinstance(bundle, dict) and bundle.get("vwapComplete") is False):
+            return stop, {"mode": rule.get("mode"), "model": model, "eligible": False, "applied": False,
+                          "reason": "VWAP_PARTIAL", "vwap": vwap, "original": stop,
+                          "gapBars": snapshot_v.get("vwapGapBars")}
         audit = stop_logic.vwap_clearance(side, entry, stop, vwap, nf, rule, model=model)
     except Exception as exc:  # noqa: BLE001
         return stop, {"mode": rule.get("mode"), "model": model, "eligible": False, "applied": False,

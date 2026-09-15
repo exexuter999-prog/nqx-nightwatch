@@ -439,7 +439,8 @@ def test_build_produces_a_usable_bundle():
                 {"text": "C: POC", "price": 29402.78}]}]},
             quote={"last": 29370.0},
         )
-        bundle = TV.build_bundle(Path(tmp), now=now)
+        bundle = TV.build_bundle(Path(tmp), now=now,
+                                 vwap_state_path=Path(tmp) / "vwap_session_state.json")
 
     snap = bundle["snapshot"]
     check("価格は quote から", bundle["price"] == 29370.0)
