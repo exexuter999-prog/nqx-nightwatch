@@ -177,7 +177,7 @@
     },
     "poolClearance": {
       "_note": "R103-1(2026-09-15, docs/R103_1_LIQUIDITY_POOL_STOP.md): SL の外側 withinN×N 以内に未回収の流動性プール(スイング高安 / セッション高安 / VAH・VAL / 前日高安)があれば、SL をそのプールの向こう clearN×N へ逃がす。SHADOW は候補に poolStop の監査と記録専用タグを足すだけで、SL・score・grade・decisionId を動かさない。LIVE にすると SL が置き換わり(60pt 上限・R:R が壊れれば WATCH)decisionId も変わる。戻すのは mode の 1 値(OFF で監査ごと止まる)。",
-      "mode": "SHADOW",
+      "mode": "LIVE",
       "withinN": 1.0,
       "clearN": 0.25,
       "kinds": [
