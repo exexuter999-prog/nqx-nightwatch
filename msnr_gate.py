@@ -36,6 +36,7 @@ import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 
+import liquidity_pools
 import strategy_models
 
 TICK = 0.25
@@ -503,6 +504,55 @@ def _compact_vwap_audit(audit):
         return {}
     return {key: audit.get(key) for key in ("mode", "applied", "reason", "vwap", "original", "stop", "shiftPt", "gapN")
             if audit.get(key) is not None}
+
+
+def _apply_pool_clearance(model, side, entry, stop, bars, levels, bundle, nf):
+    """R103-1。``(stop, audit)``。OFF は ``(stop, None)``、SHADOW は記録だけ、LIVE は置換。
+
+    vwapClearance(穴 1)と同じ形。この層の例外で評価を落とさない —— 失敗は「従来の SL の
+    まま」に倒し、理由を audit に残す。
+    """
+    policy = stop_logic_policy()
+    rule = policy.get("poolClearance") if isinstance(policy, dict) else None
+    if not isinstance(rule, dict) or str(rule.get("mode") or "OFF") == "OFF":
+        return stop, None
+    try:
+        price = _num(bundle, "price") if isinstance(bundle, dict) else None
+        if price is None and bars:
+            price = bars[-1]["c"]
+        tol = max(params()["touch_pt"], 0.10 * nf) if nf else None
+        rows = (liquidity_pools.pools(bars, levels, price, tol, nf)
+                if (bars or levels) else None)
+        audit = liquidity_pools.stop_pool_audit(side, entry, stop, rows, nf, rule, model=model)
+    except Exception as exc:  # noqa: BLE001
+        return stop, {"mode": rule.get("mode"), "model": model, "applied": False,
+                      "reason": f"ERROR:{type(exc).__name__}"}
+    audit["applied"] = bool(audit.get("required") is not None
+                            and str(rule.get("mode")) == "LIVE")
+    if audit["applied"]:
+        return audit["required"], audit
+    return stop, audit
+
+
+def _compact_pool_audit(audit):
+    """カード(4096 バイト上限)に載せる分だけ。プールは価格と種別だけ残す。"""
+    if not isinstance(audit, dict):
+        return {}
+    def _rows(key):
+        return [{"price": row.get("price"), "kind": row.get("kind")}
+                for row in (audit.get(key) or []) if isinstance(row, dict)]
+    compact = {key: audit.get(key) for key in ("mode", "applied", "reason", "original",
+                                               "required", "shiftPt", "riskN")
+               if audit.get(key) is not None}
+    for key in ("between", "beyondWithinN", "inside025N"):
+        rows = _rows(key)
+        if rows:
+            compact[key] = rows
+    nearest = audit.get("nearestBeyond")
+    if isinstance(nearest, dict):
+        compact["nearestBeyond"] = {"price": nearest.get("price"), "kind": nearest.get("kind"),
+                                    "gapPt": nearest.get("gapPt")}
+    return compact
 
 
 def _mss_reference(bars, sweep_idx, lookback, side):
@@ -2751,6 +2801,9 @@ def _candidate_for_chain(model, level, chain, bars, levels, ict, regime_info, bu
     # R90 穴 1: VWAP が SL の近くにあれば SL を VWAP の外側へ逃がして**から**採点する。
     # targets・R・SL 上限・setup_identity(= decisionId)はすべて最終の SL で決まる。
     stop, vwap_audit = _apply_vwap_clearance(model, side, entry, stop, bundle, nf)
+    # R103-1: SL の外側に未回収の流動性プールがあれば、その向こうへ逃がして**から**採点する
+    # (SHADOW は記録だけ)。LIVE の場合も targets・R:R・SL 上限・decisionId は最終の SL で決まる。
+    stop, pool_audit = _apply_pool_clearance(model, side, entry, stop, bars, levels, bundle, nf)
     targets = (targets_override if targets_override is not None
                else model_targets(entry, stop, side, levels, ict, extra=extra_targets))
     candidate = {
@@ -2772,6 +2825,14 @@ def _candidate_for_chain(model, level, chain, bars, levels, ict, regime_info, bu
         if vwap_audit.get("applied"):
             # R90: SL を VWAP の外側へ逃がした印。記録専用(採点・確認要素にしない)。
             candidate["evidence"].append("VWAP_STOP_CLEARED")
+    if pool_audit is not None:
+        candidate["poolStop"] = pool_audit
+        if pool_audit.get("applied"):
+            # R103-1: SL をプールの向こうへ逃がした印。記録専用。
+            candidate["evidence"].append("POOL_STOP_CLEARED")
+        else:
+            # SHADOW の観測。判定・採点・等級・decisionId には触れない。
+            candidate["evidence"].extend(liquidity_pools.evidence_tags(pool_audit))
     if not targets:
         candidate["hardBlockers"].append("TARGET_HEADROOM_INSUFFICIENT")
     if abs(entry - stop) > sl_cap_pt():
@@ -3003,6 +3064,32 @@ def classic_turtle_soup(level_price, side, daily_bars):
     return age_sessions >= CLASSIC_TS_MIN_AGE_SESSIONS
 
 
+CHOP_LOOKBACK = 20            # R103-1: レベル横断の観測窓(直前 20 本の確定足)
+CHOP_MIN_CROSSES = 3
+
+
+def level_chopped(bars, price, lookback=CHOP_LOOKBACK, min_crosses=CHOP_MIN_CROSSES):
+    """直前 ``lookback`` 本の終値がレベルを ``min_crosses`` 回以上横断したか(記録専用)。
+
+    横断 = 隣り合う確定足の終値がレベルの反対側へ移ったこと。ちょうど同値の足は
+    直前の側を引き継ぐ(同値だけで往復を数えない)。
+    """
+    value = _num({"p": price}, "p")
+    if value is None:
+        return False
+    sides, crosses, last = [], 0, None
+    for bar in (bars or [])[-lookback:]:
+        close = _num(bar, "c", "close") if isinstance(bar, dict) else None
+        if close is None or close == value:
+            continue
+        sides.append(1 if close > value else -1)
+    for side in sides:
+        if last is not None and side != last:
+            crosses += 1
+        last = side
+    return crosses >= min_crosses
+
+
 def feature_tags(chain, level, bars, bundle, strategy_matrix=None):
     """chain候補に付ける記録専用タグ。判定に影響しない。"""
     tags = []
@@ -3055,6 +3142,11 @@ def feature_tags(chain, level, bars, bundle, strategy_matrix=None):
                 tags.append("LEVEL_BODY_INTACT")
         except (KeyError, TypeError, ValueError):
             pass
+
+    # R103-1: 直前 20 本の終値がレベルを 3 回以上横断している(揉み合いの中に置いた
+    # アンカー)。刈られやすさの観測だけで、採点・等級・decisionId には影響しない。
+    if level_chopped(bars, (level or {}).get("price")):
+        tags.append("LEVEL_CHOPPED_3")
 
     if (chain or {}).get("type") == "SWEEP":
         # London range 境界のスイープ(EDGE_LEDGER M9: ブレイク後30分以内に
@@ -3360,6 +3452,8 @@ def select_primary(candidates, bundle=None):
         "silverBullet": chosen.get("silverBullet") or {},
         # R90: VWAP 逃がしの監査(評価して動かさなかった / 入力が無かった / 置き換えた)。
         "vwapStop": _compact_vwap_audit(chosen.get("vwapStop")),
+        # R103-1: OFF のときはキーごと足さない(出力を R103 以前と同一に保つ)。
+        **({"poolStop": _compact_pool_audit(chosen["poolStop"])} if chosen.get("poolStop") else {}),
         "modelRank": [c["model"] + ":" + str(c.get("grade")) for c in candidates[:4]],
     }
 
