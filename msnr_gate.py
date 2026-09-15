@@ -4009,7 +4009,7 @@ def build_card(result, sl_cap=None, price=None, side=None,
                 "decisionId", "phase", "model", "side", "state", "grade", "score",
                 "entryMode", "entry", "stop", "targets", "targetR", "hardBlockers",
                 "penalties", "evidence", "modelRank", "strategyModels", "strategyAlignment", "strategyBias",
-                "silverBullet", "vwapStop",
+                "silverBullet", "vwapStop", "poolStop",
             ) if key in decision
         }
     msnr = _card_msnr(result, price, side)
@@ -4178,7 +4178,8 @@ def _card_bytes(card):
 
 def _shrink_card(card):
     """4096 バイトに収める。落とす順は advisory.rrPotential → advisory.ict →
-    advisory 全体 → msnr.blockers(R6 §2 / R8 §4.1 / R10 §2)。"""
+    advisory 全体 → decision.poolStop(R103-1)→ decision.modelRank/evidence/penalties →
+    msnr.blockers(R6 §2 / R8 §4.1 / R10 §2)。"""
     if _card_bytes(card) <= CARD_MAX_BYTES:
         return card
     if "advisory" in card:
@@ -4195,6 +4196,11 @@ def _shrink_card(card):
         return card
     if "decision" in card:
         decision = card["decision"]
+        # R103-1: SHADOW の監査(poolStop)は evidence の記録タグより先に落とす。
+        # タグはスコアカードの分離キーで、監査は再生で復元できる。
+        decision.pop("poolStop", None)
+        if _card_bytes(card) <= CARD_MAX_BYTES:
+            return card
         decision.pop("modelRank", None)
         decision.pop("evidence", None)
         decision.pop("penalties", None)

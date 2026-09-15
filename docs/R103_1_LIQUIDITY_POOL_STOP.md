@@ -37,6 +37,10 @@
    - `LIVE` = SL を `required` に置換し、`POOL_STOP_CLEARED`。SL を内側へ縮めることはしない。
      60pt 上限・R:R は**置換後の SL** で判定し、壊れれば候補は WATCH。decisionId も最終 SL で決まる。
    - `select_primary` の返り値に `vwapStop` と同じ compact 形の `poolStop` を載せる(OFF ではキーごと無い)。
+     評価カード(公開状態・監査コピー `monitor_cycle_HHMM.json` の `evaluation.decision`)にも同じ
+     `poolStop` を載せる。4096 バイト上限で縮小するときは evidence の記録タグより**先に** `poolStop` を
+     落とす(監査は再生で復元できる。タグはスコアカードの分離キーなので残す)。直近 240 周期の実測では
+     カード最大 2,743 バイト、`poolStop` 最大 512 バイトで上限に届かない。
 4. 指値の SL 再検査(SHADOW のみ)
    - `stop_logic.resting_stop_recheck(side, entry, stop, bars_now, at_iso, rule)`
      → `{noiseNow, noiseSessionOpen, distPt, stale, reason}`。

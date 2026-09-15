@@ -289,6 +289,25 @@ check("LIVE: SL を内側へ縮めない", abs(cand_live["entry"] - cand_live["s
 check("LIVE: decisionId は最終 SL で決まる(SHADOW と別 ID)",
       live["decision"]["decisionId"] != off["decision"]["decisionId"])
 
+card_shadow = msnr_gate.build_card(copy.deepcopy(shadow), price=case4["priceAtArm"])
+card_off = msnr_gate.build_card(copy.deepcopy(off), price=case4["priceAtArm"])
+check("SHADOW: カード(公開状態・監査コピー)の decision にも compact な poolStop が載る",
+      (card_shadow.get("decision") or {}).get("poolStop", {}).get("required") == 29451.0,
+      (card_shadow.get("decision") or {}).get("poolStop"))
+check("OFF: カードの decision に poolStop キーは無い",
+      "poolStop" not in (card_off.get("decision") or {}), sorted((card_off.get("decision") or {}).keys()))
+check("カードは 4096 バイト以内", msnr_gate._card_bytes(card_shadow) <= msnr_gate.CARD_MAX_BYTES,
+      msnr_gate._card_bytes(card_shadow))
+big_pool = {"mode": "SHADOW", "applied": False, "reason": None, "required": 29451.0,
+            "between": [{"price": 29400.0 + i, "kind": "SWING_LOW"} for i in range(40)]}
+oversized = {"decision": {"poolStop": big_pool, "evidence": ["STOP_POOL_WITHIN_1N"], "modelRank": ["X:A"]},
+             "summary": "x" * (msnr_gate.CARD_MAX_BYTES - 700)}
+shrunk = msnr_gate._shrink_card(copy.deepcopy(oversized))
+check("縮小は poolStop を evidence より先に落とす",
+      "poolStop" not in shrunk["decision"] and shrunk["decision"].get("evidence") == ["STOP_POOL_WITHIN_1N"]
+      and msnr_gate._card_bytes(shrunk) <= msnr_gate.CARD_MAX_BYTES,
+      (sorted(shrunk["decision"].keys()), msnr_gate._card_bytes(shrunk)))
+
 # ---------------------------------------------------------------- 5. LEVEL_CHOPPED_3
 
 section("5. LEVEL_CHOPPED_3(記録専用)")
