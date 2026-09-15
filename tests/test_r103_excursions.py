@@ -118,6 +118,33 @@ result = {
 }
 row = ms.classify(result, plans={}, bars=bars,
                   tp1=case["decision"]["targets"][0], noise=case["noiseFloor"])
+check("noise 未指定でも建玉直前 12 本から出す",
+      em.noise_before(bars, case["trade"]["openedAt"]) is not None)
+check("建玉より前に 12 本無ければ noise は None(推測で埋めない)",
+      em.noise_before(bars[:5], case["trade"]["openedAt"]) is None)
+check("noise_before は msnr_gate.noise_floor と同じ母数",
+      em.NOISE_BARS == __import__("msnr_gate").NOISE_BARS)
+
+# tp1 / noise を渡さず、bars と凍結プラン(plans)だけで 4 件が STOP_HUNT になる。
+for index, item in enumerate(cases):
+    tag = item.get("tag") or f"#{index + 1}"
+    plan_result = {
+        "resultId": f"R103-PLAN-{index}",
+        "openedAt": item["trade"]["openedAt"], "closedAt": item["trade"]["closedAt"],
+        "side": "LONG" if item["decision"]["side"] == "BUY" else "SHORT",
+        "qty": 2, "entry": item["trade"]["fill"], "exit": item["trade"]["exit"],
+        "stop": item["decision"]["stop"], "fees": 4.0,
+        "scenarioId": f"S-{tag}", "mode": "SIMULATION",
+    }
+    plans = {f"S-{tag}": {"model": item["decision"]["model"], "grade": item["decision"]["grade"],
+                          "tp1": item["decision"]["targets"][0]}}
+    plan_row = ms.classify(plan_result, plans=plans, bars=bars)
+    check(f"{tag}: plans の TP1 と建玉前の足だけで STOP_HUNT になる",
+          plan_row["excursion"]["huntClass"] == "STOP_HUNT", str(plan_row["excursion"]))
+    check(f"{tag}: noiseSource=BARS_BEFORE_ENTRY",
+          plan_row["excursion"]["noiseSource"] == "BARS_BEFORE_ENTRY",
+          str(plan_row["excursion"]))
+
 check("scorecard 行に excursion が載る",
       isinstance(row.get("excursion"), dict), str(row.get("excursion")))
 check("scorecard の huntClass も STOP_HUNT",
@@ -163,6 +190,25 @@ with tempfile.TemporaryDirectory() as tmp:
           ms.backfill_excursions(bars_dir, path=path)["appended"] == 0)
     check("backfill: 足が読めなければ追記しない",
           ms.backfill_excursions(os.path.join(tmp, "nothing"), path=path)["appended"] == 0)
+
+    # backfill も凍結プランから TP1 を引く(台帳は tempdir。.secrets は読まない)。
+    ledger = os.path.join(tmp, "autotrade_ledger.jsonl")
+    with open(ledger, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"plan": {"scenarioId": row["scenarioId"], "model": row["model"],
+                                      "grade": row["grade"],
+                                      "targets": [case["decision"]["targets"][0]]}}) + "\n")
+    check("plan_index が targets[0] を tp1 として持つ",
+          ms.plan_index(ledger)[row["scenarioId"]]["tp1"] == case["decision"]["targets"][0])
+
+    plain = os.path.join(tmp, "plain.jsonl")
+    bare = {key: value for key, value in row.items() if key != "excursion"}
+    bare["recordedAt"] = "2026-09-15T00:00:00+00:00"
+    with open(plain, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(bare, ensure_ascii=False) + "\n")
+    ms.backfill_excursions(bars_dir, path=plain, ledger_path=ledger)
+    latest = [json.loads(line) for line in open(plain, encoding="utf-8")][-1]
+    check("backfill: excursion の無い行も plan の TP1 で STOP_HUNT になる",
+          latest["excursion"]["huntClass"] == "STOP_HUNT", str(latest["excursion"]))
 
     summary = ms.excursion_summary(ms.load_rows(path))
     model = row["model"]

@@ -22,6 +22,7 @@
   ``HUNT_FAV_SL_MULT = 2.0``        同: fav3hPt ≥ この倍率 × SL 幅
   ``WRONG_WAY_FAV_SL_MULT = 1.0``   WRONG_WAY: fav3hPt < この倍率 × SL 幅
   ``FLAT_PT = 2.0``                 建値付近(model_scorecard.COST_FLOOR_PT と同値)
+  ``NOISE_BARS = 12``               ``noise_before()`` の母数(msnr_gate.NOISE_BARS と同値)
 
 損切りの分類(この順に判定する):
 
@@ -47,6 +48,7 @@ POINT_VALUE = 2.0
 #: R57 の日誌が見る決済後の窓(分)。excursions() 専用。
 POST_EXIT_MIN = 60
 
+NOISE_BARS = 12
 STOP_WINDOW_MIN = 15
 TP1_WINDOW_MIN = 180
 FAV_WINDOW_MIN = 180
@@ -122,6 +124,27 @@ def _stop_reached(side: str, exit_price: Optional[float], stop: Optional[float])
         return False
     adverse = exit_price >= stop - 0.5 if side == "SHORT" else exit_price <= stop + 0.5
     return adverse and abs(exit_price - stop) <= STOP_SLIP_TOL_PT
+
+
+def noise_before(bars: Any, opened_at: Any) -> Optional[float]:
+    """建玉時刻の直前 ``NOISE_BARS`` 本の確定足レンジの中央値。足が足りなければ None。
+
+    ``msnr_gate.noise_floor`` / ``monitor_publish.vol_gate`` と同一定義(母数 12 本)。
+    武装時点の noise が行に残っていないときの後追い用。**NOISE_BARS はこの 2 つと同期すること。**
+    """
+    at = _at(opened_at)
+    rows = normalize_bars(bars)
+    if at is None or not rows:
+        return None
+    open_ts = at.timestamp()
+    before = [b for b in rows if b["t"] + BAR_SEC <= open_ts][-NOISE_BARS:]
+    if len(before) < NOISE_BARS:
+        return None
+    ranges = sorted(b["h"] - b["l"] for b in before)
+    middle = len(ranges) // 2
+    median = (ranges[middle] if len(ranges) % 2
+              else (ranges[middle - 1] + ranges[middle]) / 2.0)
+    return _r(median)
 
 
 # ---------------------------------------------------------------- R103: 刈られ方

@@ -24,13 +24,23 @@ TP1 まで伸びた(刈られた)」のか「そもそも逆方向だった」�
 2. `model_scorecard.record` が書く行に `excursion`(上の dict)が載る。
    - 確定 3 分足は `trade_journal` が既に持っているものを注入する(取り直さない)。
      注入が無ければ `result.chart` の足を使い、足が無ければ `excursion` は null。
+   - 欠けた入力は**項目ごとに**補う。TP1 は `result.chart.tp1` → 凍結プラン
+     (autotrade 台帳の `plan.tp1` / `plan.targets[0]`。model / grade の帰属で既に読んでいる
+     台帳。新しい依存は増やさない)。noise は `result.chart.noise` → 建玉直前 12 本の
+     確定足レンジの中央値(`excursion_metrics.noise_before`。`msnr_gate.noise_floor` と同定義)。
+     出所は `noiseSource`(`GIVEN` / `BARS_BEFORE_ENTRY` / null)に残る。
+     12 本揃わなければ noise は null のまま(推測で埋めない)。
    - **Worker へ publish する `result` は変えていない**(`excursion` は台帳の行だけに載る)。
 3. `model_scorecard.py --excursions`
    モデル×等級ごとに `huntClass` の内訳と、`beyondStopPt` / `tp1AfterExitMin` の中央値を表にする。
 4. `model_scorecard.py --backfill-excursions <bars_dir>`
    `<bars_dir>/*.json` の確定 3 分足で既存行を再計算し、`supersedes` 付きの新行を**追記**する
    (既存行は消さない・書き換えない = R54 と同じ訂正の作法)。
-   `tp1` / `noise` は前回の行に残っている入力を引き継ぐ。無ければ null のまま(推測で埋めない)。
+   TP1 は凍結プラン(`plan_index(ledger_path)`。既定は既存の `AUTOTRADE_LEDGER`。テストは注入)
+   → 前回の行に残っている値の順で引く。noise は前回の値 → 建玉直前の確定足。
+   どちらも無ければ null のまま(推測で埋めない)。
+   同一判定には足の本数(`excursion.bars`)も含むので、**渡す足の本数が変わると新行が 1 本増える**
+   (足を足して再計算した証跡を残すため。同じ bars_dir で 2 回走らせても追記は 0 件)。
 5. 出力の文字化け対策: `main()` の頭で `sys.stdout` / `sys.stderr` を utf-8 に再設定する
    (cp932 のコンソールで「—」が `UnicodeEncodeError` になっていた)。
 

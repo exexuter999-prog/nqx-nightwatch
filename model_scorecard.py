@@ -84,9 +84,15 @@ def plan_index(ledger_path: str = AUTOTRADE_LEDGER) -> Dict[str, Dict[str, Any]]
                 scenario_id = str(plan.get("scenarioId") or "")
                 if not scenario_id:
                     continue
+                targets = plan.get("targets")
+                tp1 = plan.get("tp1")
+                if tp1 is None and isinstance(targets, (list, tuple)) and targets:
+                    tp1 = targets[0]
                 index[scenario_id] = {
                     "model": plan.get("model") or None,
                     "grade": plan.get("grade") or None,
+                    # R103-0: 凍結時の TP1。決済後の TP1 到達を後から測るのに使う。
+                    "tp1": _num(tp1),
                     "evidence": [str(x) for x in (plan.get("decisionEvidence") or [])][:16],
                 }
     except OSError:
@@ -98,14 +104,20 @@ def excursion_of(row: Dict[str, Any], bars: Any = None,
                  tp1: Any = None, noise: Any = None) -> Optional[Dict[str, Any]]:
     """行 1 件の刈られ方(R103-0)。足が無ければ None(推測しない)。
 
+    ``noise`` が無ければ建玉直前の確定足から後追いで出す(出所は ``noiseSource``)。
     ``tp1`` と ``noise`` は再計算(--backfill-excursions)で使えるように結果へも残す。
     """
     rows = excursion_metrics.normalize_bars(bars)
     if not rows:
         return None
+    source = "GIVEN" if _num(noise) is not None else None
+    if source is None:
+        noise = excursion_metrics.noise_before(rows, row.get("openedAt"))
+        source = "BARS_BEFORE_ENTRY" if noise is not None else None
     metrics = excursion_metrics.classify(row, rows, tp1=tp1, noise=noise)
     metrics["tp1"] = _num(tp1)
     metrics["noise"] = _num(noise)
+    metrics["noiseSource"] = source
     metrics["bars"] = len(rows)
     return metrics
 
@@ -124,8 +136,9 @@ def classify(result: Dict[str, Any],
              noise: Any = None) -> Optional[Dict[str, Any]]:
     """result 1件をスコアカード行へ変換する。数値が揃わなければ None。
 
-    R103-0: ``bars`` / ``tp1`` / ``noise`` を渡すと行に ``excursion`` が載る。
-    省略時は result.chart の足を使い、それも無ければ ``excursion`` は None。
+    R103-0: ``bars`` / ``tp1`` / ``noise`` を渡すと行に ``excursion`` が載る。欠けた
+    項目は**項目ごとに**補う —— 足は result.chart、TP1 は凍結プラン(plans)、noise は
+    建玉直前の確定足。どれも無ければその項目は None(推測で埋めない)。
     """
     if not isinstance(result, dict):
         return None
@@ -187,9 +200,13 @@ def classify(result: Dict[str, Any],
         # 後から実測するための分離キー(重み付けは N が貯まるまでしない)。
         "evidenceTags": evidence_tags,
     }
-    # R103-0: 刈られ方の計測。足が無ければ None。
-    if bars is None and tp1 is None and noise is None:
-        bars, tp1, noise = _chart_inputs(result)
+    # R103-0: 刈られ方の計測。足が無ければ None。TP1 は凍結プランから引く
+    # (これが無いと決済後の TP1 到達が測れず、STOP_HUNT が一度も出ない)。
+    chart_bars, chart_tp1, chart_noise = _chart_inputs(result)
+    bars = bars if bars is not None else chart_bars
+    tp1 = tp1 if tp1 is not None else (chart_tp1 if chart_tp1 is not None
+                                       else attributed.get("tp1"))
+    noise = noise if noise is not None else chart_noise
     row["excursion"] = excursion_of(row, bars=bars, tp1=tp1, noise=noise)
     return row
 
@@ -434,21 +451,27 @@ def load_bars_dir(bars_dir: str) -> List[Dict[str, float]]:
     return [merged[t] for t in sorted(merged)]
 
 
-def backfill_excursions(bars_dir: str, path: str = SCORECARD_FILE) -> Dict[str, Any]:
+def backfill_excursions(bars_dir: str, path: str = SCORECARD_FILE,
+                        ledger_path: str = AUTOTRADE_LEDGER) -> Dict[str, Any]:
     """既存行を再計算し、変わった行だけ supersedes 付きで**追記**する。
 
     既存行は消さない・書き換えない(R54 と同じ訂正の作法)。
-    tp1 / noise は行に残っている前回の入力を使い、無ければ None のまま。
+    TP1 は凍結プラン(autotrade 台帳)→ 前回の行に残っている値の順で引き、
+    どちらも無ければ None のまま。noise が無い行は建玉直前の確定足から後追いで出す。
     """
     bars = load_bars_dir(bars_dir)
     rows = load_rows(path)
+    plans = plan_index(ledger_path)
     appended: List[Dict[str, Any]] = []
     if not bars:
         return {"bars": 0, "rows": len(rows), "appended": 0, "rowsAppended": appended}
     for row in rows:
         previous = row.get("excursion") if isinstance(row.get("excursion"), dict) else {}
+        plan = plans.get(str(row.get("scenarioId") or "")) or {}
+        tp1 = plan.get("tp1")
         metrics = excursion_of(row, bars=bars,
-                               tp1=previous.get("tp1"), noise=previous.get("noise"))
+                               tp1=tp1 if tp1 is not None else previous.get("tp1"),
+                               noise=previous.get("noise"))
         if metrics is None or metrics == row.get("excursion"):
             continue
         new_row = dict(row)
