@@ -56,6 +56,7 @@ import argparse
 import json
 import math
 import os
+import contract as contract_month  # R102: 取引限月の正本
 import re
 import subprocess
 import sys
@@ -623,7 +624,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import nqx_state
 
     cfg = ae._read_env_file()
-    symbol = args.symbol or str(cfg.get("NQX_SYMBOL") or "MNQU6")
+    symbol = args.symbol or str(cfg.get("NQX_SYMBOL") or contract_month.symbol())
     accounts = configured_accounts(cfg)
     if not accounts:
         print("fill_watch: CROSSTRADE_ACCOUNTS が空なので監視対象がありません")

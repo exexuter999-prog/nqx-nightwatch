@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 import autotrade_engine as ae  # noqa: E402
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 
 # 本番 .secrets/crosstrade.env から隔離する(tests/_hermetic.py と同じ方針)。
 # reconcile / _reconcile_one は env を cfg にマージするため、設定口座がちょうど

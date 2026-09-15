@@ -37,6 +37,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 import execution_contract
+import contract as contract_month  # R102: 取引限月の正本
 
 
 def derived_receipt(platform, account, order_id):
@@ -203,6 +204,55 @@ def oco_sibling_pair(rows, *, account, expected_action, symbol=None, all_rows=No
             return None, (f"order {row.get('orderId')} is a bracket child attached to replacement "
                           f"order {row.get('brokerParentId')}; the replacement must have no children")
     return [first, second], None
+
+
+def oco_pairs(rows, *, account, expected_action, symbol=None):
+    """R102: 建玉に対する OCO 兄弟の**組数**を数える(行の条件は oco_sibling_pair と同じ)。
+
+    TP と SL は種別が返らない(R52)ので、片方だけ残った子行は「組」にならない = 守っていない。
+    2026-09-15 15:10 の裸建玉は TP 2 本が live で SL 0 本 = 組 0 だった。
+
+    **親を持つ行も数える**(oco_sibling_pair との違い)。PLACE のブラケットは約定後、片方の子が
+    brokerParentId(= 約定した親)を持ったまま相互 ocoId で結ばれる(R76 の実測形
+    child(154, oco=155, parent=153) + child(155, oco=154))。2026-09-15 16:51、親を持つ行を落として
+    「組 0」と誤判定し、守られていた LONG 4 の分割ブラケットを 1 組へ畳んでしまった。親待ちの子
+    (OSO の未約定側)は SUSPENDED なので live 状態の条件で自然に外れる。戻り値は
+    ``(pairs, singles)``: pairs は ``[(a, b), ...]``(orderId 順)、singles は組にならなかった
+    live 行。数量・価格は比較しない(ブローカーが返さない)。
+    """
+    wanted_account = str(account)
+    wanted_action = str(expected_action or "").upper()
+    live = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("accountId") or row.get("account") or "") != wanted_account:
+            continue
+        if symbol not in (None, "") and str(row.get("symbol") or "") != str(symbol):
+            continue
+        if str(row.get("action") or "").upper() != wanted_action:
+            continue
+        if str(row.get("status") or "").upper() not in BROKER_LIVE_PROTECTIVE_STATES:
+            continue
+        if not str(row.get("orderId") or ""):
+            continue
+        live.append(row)
+    by_id = {str(row.get("orderId")): row for row in live}
+    pairs, used = [], set()
+    for row in sorted(live, key=lambda item: str(item.get("orderId") or "")):
+        row_id = str(row.get("orderId"))
+        if row_id in used:
+            continue
+        mate_id = str(row.get("brokerOcoId") or "")
+        mate = by_id.get(mate_id)
+        if mate is None or mate_id in used or mate_id == row_id:
+            continue
+        if str(mate.get("brokerOcoId") or "") != row_id:
+            continue
+        pairs.append((row, mate))
+        used.update({row_id, mate_id})
+    singles = [row for row in live if str(row.get("orderId")) not in used]
+    return pairs, singles
 
 
 def verify_protective_orders(order_view, accounts, qty, stop, target, *, side=None,
@@ -379,7 +429,7 @@ CROSSTRADE_ENV = os.path.join(BASE, ".secrets", "crosstrade.env")
 TRADOVATE_ENV = os.path.join(BASE, ".secrets", "tradovate.env")
 TOKEN_CACHE = os.path.join(BASE, ".secrets", "tradovate_token.json")
 
-DEFAULT_SYMBOL = "MNQU6"
+DEFAULT_SYMBOL = contract_month.symbol()   # R102: 正本から
 HTTP_TIMEOUT = 15
 
 

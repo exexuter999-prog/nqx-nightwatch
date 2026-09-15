@@ -25,6 +25,8 @@
 """
 from __future__ import annotations
 
+import contract as contract_month  # R102: 取引限月の正本
+
 import argparse
 import io
 import json
@@ -311,7 +313,7 @@ def render_png(position: Dict[str, Any], plan: Dict[str, Any], last_price: float
     f_jsmall = _jfont(15)
 
     entry, stop, side = derived["entry"], derived["stop"], derived["side"]
-    symbol = str(position.get("symbol") or plan.get("symbol") or "MNQU6")
+    symbol = str(position.get("symbol") or plan.get("symbol") or contract_month.symbol())
 
     # ---- ヘッダ
     d.text((PAD, 46), "NIGHTWATCH", font=f_brand, fill=MOON)
@@ -595,7 +597,7 @@ def render_png(position: Dict[str, Any], plan: Dict[str, Any], last_price: float
     return buf.getvalue()
 
 
-def caption(derived: Dict[str, Any], symbol: str = "MNQU6") -> str:
+def caption(derived: Dict[str, Any], symbol: str = contract_month.symbol()) -> str:
     """写真に添える1〜3行(HTML)。数字は derive_open が出したものだけを使う。"""
     head = (f"<b>{derived['side']} {derived['qty']}×{derived['accounts']} "
             f"{symbol}</b>  {_money(derived['unrealTotal'])} unrealized")
@@ -742,7 +744,7 @@ def render_open_card(accounts: Optional[Sequence[str]] = None,
     png = render_png(parts["position"], parts["plan"], parts["last"],
                      bars=parts["bars"], accounts=parts["accounts"], note=note)
     symbol = str(parts["position"].get("symbol")
-                 or parts["plan"].get("symbol") or "MNQU6")
+                 or parts["plan"].get("symbol") or contract_month.symbol())
     return png, caption(derived, symbol=symbol), derived
 
 
@@ -823,7 +825,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.send:
         import telegram_bot
 
-        symbol = str(parts["position"].get("symbol") or "MNQU6")
+        symbol = str(parts["position"].get("symbol") or contract_month.symbol())
         text = caption(derived, symbol=symbol)
         if args.demo:
             text = "DEMO — 実建玉ではありません\n" + text

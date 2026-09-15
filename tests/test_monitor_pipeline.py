@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 
 import monitor_pipeline as pipeline  # noqa: E402
 

@@ -26,6 +26,8 @@ OS環境変数の明示値は緊急上書きとして最優先、ローカル台
 """
 from __future__ import annotations
 
+import contract as contract_month  # R102: 取引限月の正本
+
 import argparse
 import json
 import os
@@ -122,7 +124,7 @@ def _max_accounts() -> int:
 
 def _symbol(cfg: Optional[Dict[str, str]] = None) -> str:
     cfg = cfg if cfg is not None else read_env_file()
-    return str(os.environ.get("NQX_SYMBOL") or cfg.get("NQX_SYMBOL") or "MNQU6")
+    return str(os.environ.get("NQX_SYMBOL") or cfg.get("NQX_SYMBOL") or contract_month.symbol())
 
 
 # ------------------------------------------------------------------ 読み取り

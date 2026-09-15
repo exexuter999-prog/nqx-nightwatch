@@ -9,7 +9,7 @@
  *
  * この DO は発注しない。発注経路を一切持たない。
  */
-import { applyEvent, buildManualHalt, emptyState, projectState, sweepExpired, validateAccountPrefs } from "./state_machine.js";
+import { adoptSymbol, applyEvent, buildManualHalt, emptyState, projectState, sweepExpired, validateAccountPrefs } from "./state_machine.js";
 
 const NONCE_RETENTION_MS = 24 * 60 * 60 * 1000;
 //: 掃除の間隔。保持窓(24h)より十分短ければ滞留は増えない。
@@ -91,8 +91,11 @@ export class NightwatchState {
     if (!rows.length) return emptyState(accountId, symbol);
     try {
       const parsed = JSON.parse(rows[0].doc);
-      // account/symbol は作成時に固定する。後から別物を書き込ませない。
-      return parsed && typeof parsed === "object" ? parsed : emptyState(accountId, symbol);
+      // account/symbol は作成時に固定する。後から別物を書き込ませない —— ただし限月ロール
+      // (R102d)だけは、建玉なし・claim 終端・blocking 注文なしのときに NQX_SYMBOL へ載せ替える
+      // (載せ替えは決定的で、次に受理されたイベントの保存で永続化される)。
+      if (!(parsed && typeof parsed === "object")) return emptyState(accountId, symbol);
+      return adoptSymbol(parsed, symbol, Date.now()).state;
     } catch {
       return emptyState(accountId, symbol);
     }

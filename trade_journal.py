@@ -73,6 +73,8 @@ publish 先は Durable Object の ``result`` ストリームだけ。
 """
 from __future__ import annotations
 
+import contract as contract_month  # R102: 取引限月の正本
+
 import json
 import os
 import sys
@@ -322,7 +324,7 @@ def observe(bundle: Dict[str, Any], positions: Dict[str, Dict[str, Any]],
                     "account": account,
                     "generation": generation,
                     "entryKey": str(plan.get("entryKey") or ""),
-                    "symbol": str(position.get("symbol") or plan.get("symbol") or "MNQU6"),
+                    "symbol": str(position.get("symbol") or plan.get("symbol") or contract_month.symbol()),
                     "side": side,
                     "entry": entry,
                     "initialStop": _num(plan.get("initialStop")),
@@ -424,7 +426,7 @@ def build_and_publish(state: Dict[str, Any], *, mode: str = "SIMULATION",
         side=state["side"], entry=float(state["entry"]),
         stop=float(state["initialStop"]), qty=int(state.get("initialQty") or 0),
         opened_at=state["openedAt"], closed_at=state["closedAt"],
-        symbol=state.get("symbol") or "MNQU6", bars=bars, mode=mode,
+        symbol=state.get("symbol") or contract_month.symbol(), bars=bars, mode=mode,
         legs=legs, exit_source="broker",
         # ライフサイクル突合キー。凍結プランのシナリオと決済元の口座を result に
         # 残し、Mini App がエントリー→決済のカードをキーで繋げられるようにする。
@@ -930,7 +932,7 @@ def build_trade_result(trade: Dict[str, Any], plan: Optional[Dict[str, Any]], *,
     kwargs = dict(
         side=trade["side"], entry=float(trade["entry"]), stop=stop, qty=int(trade["qty"]),
         opened_at=trade["openedAt"], closed_at=trade["closedAt"],
-        symbol=trade.get("symbol") or "MNQU6", bars=bars, mode=mode,
+        symbol=trade.get("symbol") or contract_month.symbol(), bars=bars, mode=mode,
         legs=legs, exit_source="broker",
         scenario_id=(plan or {}).get("scenarioId") or None,
         account_id=account,
@@ -1035,7 +1037,7 @@ def reconcile_fills(bundle: Dict[str, Any], *, accounts: List[str],
                     mode: str = "SIMULATION", now: Optional[datetime] = None,
                     publisher: Optional[Callable[..., Tuple[bool, Any]]] = None,
                     builder: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None,
-                    symbol: str = "MNQU6",
+                    symbol: str = contract_month.symbol(),
                     fee_rates: Optional[Dict[str, float]] = None) -> List[str]:
     """約定列を口座ごとに読み、閉じた往復を LEDGER へ publish する。
 
@@ -1243,9 +1245,9 @@ def reconcile(bundle: Dict[str, Any], *, accounts: List[str],
     balance_query = balance_query or broker_status.query_balance
     if fills_query is _BROKER:
         fills_query = None if injected else broker_status.query_fills
-    symbol = str(bundle.get("sourceSymbol") or bundle.get("symbol") or "MNQU6")
+    symbol = str(bundle.get("sourceSymbol") or bundle.get("symbol") or contract_month.symbol())
     if "MNQ" in symbol and not symbol.startswith("MNQ"):
-        symbol = "MNQU6"
+        symbol = contract_month.symbol()
 
     records, ledger_error = autotrade_engine._read_ledger(ledger_path)
     if ledger_error:
@@ -1369,7 +1371,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if snapshot.get("verified") is not True:
         print(f"fills unavailable: {snapshot.get('detail')}")
         return 1
-    fills = normalize_fills(snapshot.get("fills"), "MNQU6")
+    fills = normalize_fills(snapshot.get("fills"), contract_month.symbol())
     closed, state = round_trips(fills)
     try:
         rate = fee_rates_from_env(nqx_state._read_kv_env(nqx_state.CROSSTRADE_ENV),
@@ -1377,14 +1379,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception:                              # noqa: BLE001 — 手数料は任意
         rate = None
     records, error = autotrade_engine._read_ledger(LEDGER_FILE)
-    by_order, timeline = plan_lookup(records or [], account, "MNQU6")
+    by_order, timeline = plan_lookup(records or [], account, contract_month.symbol())
     journal = load_journal()
     print(f"{account}: {len(fills)} fills -> {len(closed)} closed round-trips ({mode})"
           + (f" · ledger unreadable ({error})" if error else ""))
 
     sent = 0
     for trade in closed:
-        trade["symbol"] = "MNQU6"
+        trade["symbol"] = contract_month.symbol()
         trade["account"] = account
         plan, how = attribute_plan(trade, by_order, timeline)
         # R85: 遡及でも手数料は約定枚数 × 単価(未設定なら手数料なし = 従来どおり)。

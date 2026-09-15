@@ -37,7 +37,7 @@ MAX_QTY            = 2      # rebound from execution_contract after imports
 # 実効枠は口座ごとに違う(LUCIDFLEX 25K は日次上限 $600 → $60)。口座を替えた
 # ときに変え忘れないよう、.secrets/crosstrade.env の MAX_RISK_DOLLARS で上書きできる。
 MAX_RISK_DOLLARS   = 240.0
-SYMBOL             = "MNQU6"
+SYMBOL             = "MNQU6"   # R102: import 後に contract.py(取引限月の正本)で上書きする
 
 # 建玉照会ができない状態での新規ライブ発注は、未確認を FLAT と
 # 誤解するため禁止する。dry-run は照会せず生成できるが、--confirm は
@@ -48,9 +48,21 @@ import execution_intent
 import management_intent
 import pyramid
 import route_identity
+import contract as contract_month  # R102: 取引限月の正本
 
 MAX_QTY = int(execution_contract.CONTRACT["risk"]["maxQty"])
 MAX_RISK_DOLLARS = float(execution_contract.CONTRACT["risk"]["defaultCapDollars"])
+SYMBOL = contract_month.symbol()                    # R102: 発注先の限月は正本から(MNQU6 の直書きを廃止)
+
+
+def last_divergence_pt(cfg=None):
+    """R102: 判断に使った現在値(--last)と送信直前の quote の許容乖離(pt)。既定 40pt。"""
+    raw = os.environ.get("NQX_LAST_DIVERGENCE_PT") or (cfg or {}).get("NQX_LAST_DIVERGENCE_PT") or "40"
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 40.0
+    return max(value, 0.25)
 
 
 def require_verified_flat(symbol, accounts=None, purpose="live order"):
@@ -253,7 +265,15 @@ def modify_reference_price(last):
             if value is None:
                 value = parsed.get("close")
             value = float(value)
-            if value > 0 and "MNQ" in str(parsed.get("symbol") or ""):
+            # R102: quote は前面チャートの銘柄。発注先の限月そのものでなければ使わない
+            # (連続足 MNQ1! が別限月へロールしていた 2026-09-15 の再発防止)。
+            quote_symbol = str(parsed.get("symbol") or "")
+            front = None
+            if contract_month.is_continuous(quote_symbol):
+                # R102b: 連続足は front_contract で「今どの限月か」を解決してから採用する。
+                front = str(tv_fetch.chart_symbol_info().get("front_contract") or "") or None
+            resolved = contract_month.resolved_contract(quote_symbol, front)
+            if value > 0 and resolved and contract_month.same_contract(resolved, contract_month.symbol()):
                 return value, "quote"
         except Exception:  # noqa: BLE001 - quote が無ければ --last へ
             pass
@@ -952,6 +972,13 @@ def main():
     p.add_argument("--last", type=float,
                    help="発注直前に観測した現在値。成行のリスク概算と口座別判定に必須。"
                         "指値に添えると即約定側の指値(実質成行)を検知して拒否する")
+    p.add_argument("--repair-naked", action="store_true",
+                   help="R102: --modify 専用。保護注文の OCO 組が 0(裸)の建玉に SL/TP を 1 組で張る修復。"
+                        "全脚生存の保護(MODIFY_SPLIT_PLAN_PROTECTED)は、裸がブローカー照会で確認できた"
+                        "ときだけ外す")
+    p.add_argument("--price-symbol", default=None,
+                   help="R102: --last を観測したチャートの銘柄(例 CME_MINI:MNQU2026)。発注先と別の"
+                        "限月なら LAST_SYMBOL_MISMATCH で拒否する")
     p.add_argument("--min-stop-pt", type=float,
                    help="R90: 成行のとき、参照価格(quote が取れればそれ、無ければ --last)から SL "
                         "までがこの距離(pt)未満なら MARKET_STOP_TOO_CLOSE で拒否する。engine が "
@@ -1172,6 +1199,13 @@ def main():
             live_protective = [row for row in (guard_view.get("activeOrders") or [])
                                if isinstance(row, dict)
                                and str(row.get("action") or "").upper() == opposite]
+            naked_pairs, naked_singles = ([], [])
+            if a.repair_naked:
+                naked_pairs, naked_singles = broker_status.oco_pairs(
+                    guard_view.get("orders") or [], account=account, expected_action=opposite, symbol=a.symbol)
+            if a.repair_naked and naked_pairs:
+                sys.exit(f"ERROR: REPAIR_NOT_NAKED: 保護注文の OCO 組が {len(naked_pairs)} 組あります。"
+                         "--repair-naked は組が 0 のときだけ使えます")
             if a.pyramid_consolidate:
                 # R84 §5.3: 合成建玉(複数トランシェ)の統合。**全 TP1 脚が解決済み**で
                 # あることは engine が構造(脚の三状態)で確定させており、ここではその
@@ -1189,6 +1223,9 @@ def main():
                 else:
                     print(f"※ R84 統合: 保護注文 {len(live_protective)} 本"
                           f"({len(live_protective) // 2} 組)を 1 組へ畳みます")
+            elif a.repair_naked:
+                print(f"※ R102 裸修復(ULTRA): OCO 組 0(孤立行 {len(naked_singles)} 本)。"
+                      f"全量 {held_qty} 枚に SL/TP を 1 組で張ります")
             elif len(live_protective) > 2:
                 sys.exit(
                     "ERROR: MODIFY_SPLIT_PLAN_PROTECTED: "
@@ -1200,6 +1237,19 @@ def main():
                 # 手動 SL で 2 本に戻していなければ engine の修復も通らなかった)。
                 print(f"※ 保護注文が {len(live_protective)} 本しかありません(片脚拒否/裸)。"
                       "runner の保護を張り直す修復として続行します(R78)")
+        elif held_qty >= fixed_qty and a.repair_naked:
+            # R102: 裸(OCO 組 0)の全量建玉に SL/TP を張る修復。組が 1 つでもあれば従来どおり拒否。
+            guard_view = broker_status.query_orders(a.symbol, account=account)
+            if not isinstance(guard_view, dict) or guard_view.get("verified") is not True:
+                sys.exit("ERROR: modify blocked — protective orders are UNVERIFIED")
+            opposite = "SELL" if a.side == "buy" else "BUY"
+            naked_pairs, naked_singles = broker_status.oco_pairs(
+                guard_view.get("orders") or [], account=account, expected_action=opposite, symbol=a.symbol)
+            if naked_pairs:
+                sys.exit(f"ERROR: REPAIR_NOT_NAKED: 保護注文の OCO 組が {len(naked_pairs)} 組あります。"
+                         "--repair-naked は組が 0 のときだけ使えます")
+            print(f"※ R102 裸修復: OCO 組 0(孤立行 {len(naked_singles)} 本)。"
+                  f"全量 {held_qty} 枚に SL/TP を 1 組で張ります(TP1 と runner は 1 本に畳まれる)")
         elif held_qty >= fixed_qty:
             sys.exit(
                 "ERROR: MODIFY_SPLIT_PLAN_PROTECTED: "
@@ -1443,6 +1493,57 @@ def main():
         if len(set(split_targets)) != len(split_targets):
             sys.exit("ERROR: 分割型のTP1とrunner最終TPは異なる価格にしてください")
 
+
+    # ---- R102: 発注先の限月と価格の出所(ドライランでも --confirm でも同じ順で検査) ----
+    # 2026-09-15 15:10、チャート(連続足 MNQ1! = 12 月限)の値で作った買い指値 29,363.75 が
+    # 9 月限 MNQU6(市場 29,078)へ 285pt 上の通過指値として飛び、SL 29,329.75 は市場より上で
+    # 置けず裸になった。ここで止める:
+    #   (a) --symbol が正本の限月(contract.py)そのものである
+    #   (b) 満期の手前(contract.lastEntryDaysBeforeExpiry 日未満)ではない
+    #   (c) --last の出所(--price-symbol)が発注先と同じ限月である
+    #   (d) 送信直前の quote(同じ限月のときだけ採用)と --last が乖離していない
+    #   (e) 参照価格が取れない新規は送らない(fail-closed)
+    #   (f) 指値が参照価格を通過していない / SL が参照価格の守れる側にある
+    if not contract_month.same_contract(a.symbol, contract_month.symbol()):
+        sys.exit(f"ERROR: ORDER_SYMBOL_NOT_CONTRACT: --symbol {a.symbol} は正本の限月 "
+                 f"{contract_month.symbol()} ではありません(python contract.py --status)")
+    entry_ok, entry_reason = contract_month.entry_allowed()
+    if not entry_ok:
+        sys.exit(f"ERROR: {entry_reason}(新規は満期の手前で止める。撤退は --flatten)")
+    if a.price_symbol and not contract_month.same_contract(a.price_symbol, a.symbol):
+        sys.exit(f"ERROR: LAST_SYMBOL_MISMATCH: --last の出所 {a.price_symbol} は発注先 {a.symbol} "
+                 "と別の限月です(チャートが連続足/別限月のまま)")
+    quote_ref, quote_src = modify_reference_price(None)
+    if a.last is not None and quote_ref is not None \
+            and abs(float(a.last) - quote_ref) > last_divergence_pt():
+        sys.exit(f"ERROR: LAST_PRICE_DIVERGENT: --last {fmt_price(a.last)} と送信直前の quote "
+                 f"{fmt_price(quote_ref)} が {abs(float(a.last) - quote_ref):.2f}pt 離れています"
+                 f"(> {last_divergence_pt():g}pt。判断の価格と発注先の価格が別物)")
+    if quote_ref is not None:
+        market_ref, market_src = quote_ref, quote_src
+    elif a.last is not None:
+        market_ref, market_src = float(a.last), "--last"
+    else:
+        sys.exit("ERROR: QUOTE_UNAVAILABLE: 発注先限月の参照価格が取れません(quote 不可・--last なし)。"
+                 "新規は参照価格なしで送りません(--last を添えてください)")
+    if not a.market:
+        if a.side == "buy" and a.entry >= market_ref:
+            sys.exit(f"ERROR: ENTRY_LIMIT_THROUGH_MARKET: 買い指値 {fmt_price(a.entry)} が参照価格 "
+                     f"{fmt_price(market_ref)}({market_src})以上 — 即約定します。"
+                     "今すぐ入るのが意図なら --market --last で発注してください")
+        if a.side == "sell" and a.entry <= market_ref:
+            sys.exit(f"ERROR: ENTRY_LIMIT_THROUGH_MARKET: 売り指値 {fmt_price(a.entry)} が参照価格 "
+                     f"{fmt_price(market_ref)}({market_src})以下 — 即約定します。"
+                     "今すぐ入るのが意図なら --market --last で発注してください")
+    if a.side == "buy" and a.sl >= market_ref:
+        sys.exit(f"ERROR: STOP_WRONG_SIDE_OF_MARKET: 買いの SL {fmt_price(a.sl)} が参照価格 "
+                 f"{fmt_price(market_ref)}({market_src})以上 — ブローカーが置けず裸になります")
+    if a.side == "sell" and a.sl <= market_ref:
+        sys.exit(f"ERROR: STOP_WRONG_SIDE_OF_MARKET: 売りの SL {fmt_price(a.sl)} が参照価格 "
+                 f"{fmt_price(market_ref)}({market_src})以下 — ブローカーが置けず裸になります")
+    print(f"R102 contract gate: {a.symbol} (expiry {contract_month.expiry().isoformat()}, "
+          f"{contract_month.days_to_expiry()}d) reference {fmt_price(market_ref)}({market_src}) OK")
+
     # ---- リスク判定の基準価格 ----
     # 指値はエントリー価格が基準。成行は約定価格が事前に確定しないため、
     # 観測した現在値(--last)+ 滑り緩衝でリスクを概算する。
@@ -1476,15 +1577,8 @@ def main():
     else:
         ref = a.entry
         slippage = 0.0
-        if a.last is not None:
-            # 2026-08-12 の実害: 現在値より不利な側の指値は即約定し、実質成行になる。
-            # 今すぐ入るのが意図なら --market として(滑り緩衝込みで)判定させる。
-            if a.side == "buy" and a.entry >= a.last:
-                sys.exit(f"ERROR: 買い指値({a.entry})が現在値({a.last})以上 — 即約定します。\n"
-                         "  今すぐ入るのが意図なら --market --last で発注してください。")
-            if a.side == "sell" and a.entry <= a.last:
-                sys.exit(f"ERROR: 売り指値({a.entry})が現在値({a.last})以下 — 即約定します。\n"
-                         "  今すぐ入るのが意図なら --market --last で発注してください。")
+        # 2026-08-12 の実害(現在値より不利な側の指値は即約定)は、上の R102 の門が
+        # 参照価格(quote / --last)に対して ENTRY_LIMIT_THROUGH_MARKET で止める。
 
     # SL/TP の向きチェック(成行は現在値を基準に判定する)
     basis = "現在値" if a.market else "エントリー"

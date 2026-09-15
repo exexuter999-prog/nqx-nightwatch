@@ -46,7 +46,7 @@ POLL_TIMEOUT = 30          # long polling の待ち秒数
 SUBPROCESS_TIMEOUT = 30    # order.py の実行上限
 
 # ---- Mini App 一回押し発注 ----
-NQX_SYMBOL = "MNQU6"                                    # TRADING_CONTEXT.md §2
+# NQX_SYMBOL は下の import 群の後で正本(contract.py)から取る(R102)。
 TICK = 0.25                                             # CME MNQ の最小刻み
 POINT_VALUE = 2.00                                      # MNQ 1pt = $2.00
 ORDER_KEY_FILE = os.path.join(BASE, ".secrets", "nqx_order_keys.json")
@@ -61,6 +61,8 @@ sys.path.insert(0, BASE)
 import broker_status                                    # noqa: E402
 import nqx_state                                        # noqa: E402
 import execution_contract                               # noqa: E402
+import contract as contract_month  # R102: 取引限月の正本  # noqa: E402
+NQX_SYMBOL = contract_month.symbol()                    # TRADING_CONTEXT.md §2 / R102 正本
 import management_intent                                # noqa: E402
 import route_envelope                                   # noqa: E402
 import strategy_evidence                                # noqa: E402
@@ -1175,7 +1177,7 @@ def recover_unknown_server_lock(key, broker_position, broker_order, *,
     # the Durable Object CAS.  Injected callables keep tests fully offline.
     position_query = position_query or broker_status.query_position
     orders_query = orders_query or broker_status.query_orders
-    symbol = str((claim.get("executionIntent") or {}).get("symbol") or "MNQU6")
+    symbol = str((claim.get("executionIntent") or {}).get("symbol") or contract_month.symbol())
     current_before = position_query(symbol)
     current_orders = orders_query(symbol, known_order_ids=sorted(frozen_ids))
     current_after = position_query(symbol)
@@ -1736,6 +1738,20 @@ def handle_scenario_order_confirmed(cfg, payload):
 
     argv = ["--side", side, "--qty", str(qty),
             "--entry", fmt_price(entry), "--sl", fmt_price(sl), "--symbol", symbol]
+    # R102: 参照価格と出所はサーバー正本の market(同じ view)から。order.py は指値の通過と
+    # SL の側を発注先限月の価格で検査し、価格が無ければ送信直前の quote、それも無ければ
+    # QUOTE_UNAVAILABLE で送らない(2026-09-15 の 285pt 通過指値の再発防止)。
+    view_for_ref = scenario.get("_authoritativeView") if isinstance(scenario.get("_authoritativeView"), dict) else {}
+    market_ref = view_for_ref.get("market") if isinstance(view_for_ref.get("market"), dict) else {}
+    try:
+        market_price = float(market_ref.get("price")) if market_ref.get("price") is not None else None
+    except (TypeError, ValueError):
+        market_price = None
+    if market_price is not None and math.isfinite(market_price) and market_price > 0:
+        argv += ["--last", fmt_price(market_price)]
+    price_origin = str(market_ref.get("sourceContract") or market_ref.get("sourceSymbol") or "")
+    if price_origin and not contract_month.is_continuous(price_origin):
+        argv += [f"--price-symbol={price_origin}"]
     if runner_tp is not None:
         argv += ["--split-tp", f"{fmt_price(tp)},{fmt_price(runner_tp)}"]
     else:

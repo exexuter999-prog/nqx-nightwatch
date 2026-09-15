@@ -539,6 +539,19 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
         return 2
 
     print(f"autotrade: {autotrade_arm.summary()}")
+    # R102: 取引限月の正本(execution_contract.json.contract)。満期までの日数と新規可否を毎周期
+    # 1 行で見せ、NQX_SYMBOL を持つ設定(env / wrangler.toml / monitor_config.json)が正本と
+    # 食い違えば相場データを取る前に HALT する(チャートと発注先が別限月のまま走らせない)。
+    import contract as contract_month
+    print(contract_month.summary_line())
+    try:
+        disagree = contract_month.enforce_sites()
+    except contract_month.ContractError as exc:
+        disagree = f"CONTRACT_INVALID: {exc}"
+    if disagree:
+        print(f"HALT: {disagree}")
+        send_beacon("HALT", disagree)
+        return 2
     # R78: 約定監視(fill_watch.py)の生死。止まっていても周期は続けるが、TP1 検知が
     # 3 分遅れに戻っていることを毎周期 1 行で見せる。
     # R91: 契約 fillWatch.autostart=true なら、止まっている fill_watch をここで起動し直す

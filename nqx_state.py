@@ -37,6 +37,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import execution_contract
+import contract as contract_month  # R102: 取引限月の正本
 import execution_intent
 import management_intent
 import strategy_evidence
@@ -82,7 +83,7 @@ def load_cloud_env(required=True):
         for key in ("NQX_API_BASE", "NQX_PUBLISH_SECRET", "NQX_ACCOUNT_ID"):
             if not cfg.get(key):
                 raise NotConfigured(f"{CLOUD_ENV} に {key} がありません")
-    cfg.setdefault("NQX_SYMBOL", "MNQU6")
+    cfg.setdefault("NQX_SYMBOL", contract_month.symbol())
     cfg.setdefault("NQX_WEB_APP_URL", "https://nqx-nightwatch.pages.dev/")
     return cfg
 
@@ -368,7 +369,7 @@ def build_scenario(raw, observed_at, ttl_minutes=15, symbol=None, state=None, ul
     エンベロープで検証し、脚を比率分割(端数は runner)にする。既定の
     ``ultra=False`` では従来どおり固定枚数だけを通す(既定で緩む経路を作らない)。
     """
-    symbol = symbol or load_cloud_env(required=False).get("NQX_SYMBOL", "MNQU6")
+    symbol = symbol or load_cloud_env(required=False).get("NQX_SYMBOL", contract_month.symbol())
     observed = datetime.fromisoformat(str(observed_at))
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
@@ -1762,7 +1763,7 @@ def build_result(closed_position, exit_price, exit_source, bars=None,
     payload = {
         "resultId": result_id,
         "side": side,
-        "symbol": symbol or closed_position.get("symbol") or "MNQU6",
+        "symbol": symbol or closed_position.get("symbol") or contract_month.symbol(),
         "qty": qty,
         "entry": float(entry),
         "exit": float(exit_price),
@@ -1936,7 +1937,7 @@ def sync_position(cfg=None, symbol=None):
     import broker_status  # 循環 import を避けるため遅延
 
     cfg = cfg or load_cloud_env()
-    symbol = symbol or cfg.get("NQX_SYMBOL", "MNQU6")
+    symbol = symbol or cfg.get("NQX_SYMBOL", contract_month.symbol())
     result = broker_status.query_position(symbol)
     # ブローカーは SL/TP を返さない。凍結プランの水準を重ねて publish する
     # (無ければ素通し。position_plan_overlay の docstring 参照)。

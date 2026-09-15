@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 
 for _stream in ("stdout", "stderr"):
     _file = getattr(sys, _stream, None)
@@ -219,6 +220,17 @@ def send(raw, cfg=CFG_LIVE):
     return html.unescape(re.sub(r"<[^>]+>", "", str(text))), note
 
 
+def _market_reference(scenario):
+    try:
+        entry = float(scenario.get("entry"))
+    except (TypeError, ValueError):
+        return {}
+    side = str(scenario.get("side") or "BUY").upper()
+    # 買い指値は市場より下で、売り指値は市場より上で resting する。
+    return {"price": entry + 10.0 if side == "BUY" else entry - 10.0,
+            "sourceSymbol": "CME_MINI:MNQU2026"}
+
+
 def authoritative_view(scenario, *, orderable=True, grade=None):
     """Make a current server view for authoritative-gate tests.
 
@@ -245,6 +257,8 @@ def authoritative_view(scenario, *, orderable=True, grade=None):
             "at": observed_at,
             "observedAt": observed_at,
             "cvdAt": observed_at,
+            # R102: 参照価格(指値が resting する側)と出所。order.py の限月/価格の門を通すため。
+            **_market_reference(scenario),
             "cycleId": scenario["marketCycleId"], "cycleCommitted": True,
             "strategyEvidence": evidence,
             "evaluation": {"decision": {"grade": active_grade}},

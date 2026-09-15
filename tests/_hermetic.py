@@ -52,6 +52,22 @@ def make_sandbox(base):
                  os.path.join(sandbox, "pyramid.py"))
     shutil.copy2(os.path.join(base, "execution_contract.json"),
                  os.path.join(sandbox, "execution_contract.json"))
+    # R102: order.py は取引限月の正本 contract.py を import する。
+    shutil.copy2(os.path.join(base, "contract.py"),
+                 os.path.join(sandbox, "contract.py"))
+    # R102: サンドボックスの限月は本番ではなくテストの固定契約(_pin_contract.PIN)。本番が MNQZ6 へ
+    # ロールしても fixture の MNQU6 が ORDER_SYMBOL_NOT_CONTRACT / CONTRACT_EXPIRED で落ちない。
+    import json as _json
+    if base not in sys.path:
+        sys.path.insert(0, base)          # _pin_contract は execution_contract(base)を読む
+    import _pin_contract
+    _json_path = os.path.join(sandbox, "execution_contract.json")
+    with open(_json_path, encoding="utf-8") as fh:
+        _contract_doc = _json.load(fh)
+    _contract_doc["contract"] = dict(_pin_contract.PIN)
+    _contract_doc.setdefault("manualHalt", {})["autotrade"] = False
+    with open(_json_path, "w", encoding="utf-8") as fh:
+        _json.dump(_contract_doc, fh, ensure_ascii=False, indent=2)
     shutil.copy2(os.path.join(base, "dayguard.py"),
                  os.path.join(sandbox, "dayguard.py"))
     os.makedirs(os.path.join(sandbox, ".secrets"), exist_ok=True)

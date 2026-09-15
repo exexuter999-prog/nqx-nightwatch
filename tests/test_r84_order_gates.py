@@ -70,7 +70,7 @@ ok, out = run(["--pyramid", BASE_DECL], args=no_ultra)
 check("--ultra が無ければ落ちる",
       not ok and "PYRAMID_REQUIRES_ULTRA" in out, out[-300:])
 
-limit_args = ["--side", "sell", "--qty", "6", "--entry", "29500", "--sl", "29507.5",
+limit_args = ["--side", "sell", "--qty", "6", "--entry", "29500", "--sl", "29507.5", "--last", "29490",
               "--split-tp", "29400,29300", "--ultra", "--ultra-drawdown", "2268",
               "--accounts", "TEST"]
 ok, out = run(["--pyramid", BASE_DECL], args=limit_args)
@@ -139,7 +139,8 @@ print()
 print("--- 既存ゲートは全部そのまま ---")
 wrong_sl = [value if value != "29507.5" else "29400.0" for value in ADD]
 ok, out = _hermetic.dry_run(SANDBOX, wrong_sl + ["--pyramid", BASE_DECL])
-check("SL の向きは従来どおり検査される", not ok and "売りのSL" in out, out[-300:])
+check("SL の向きは従来どおり検査される(R102 では STOP_WRONG_SIDE_OF_MARKET が先に止める)",
+      not ok and ("売りのSL" in out or "STOP_WRONG_SIDE_OF_MARKET" in out), out[-300:])
 one_tp = [value if value != "29400,29300" else "29400" for value in ADD]
 ok, out = _hermetic.dry_run(SANDBOX, one_tp + ["--pyramid", BASE_DECL])
 check("分割 TP は 2 本必須(ULTRA と同じ)",

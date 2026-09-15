@@ -24,6 +24,8 @@ so a monitor never consumes a partial result.
 
 from __future__ import annotations
 
+import contract as contract_month  # R102: 取引限月の正本
+
 import argparse
 import copy
 import hashlib
@@ -482,8 +484,11 @@ def _validate_evidence(bundle: Dict[str, Any], cfg: Dict[str, Any], now: datetim
         _parse_at(bundle.get("priceAt"), "priceAt")
     except PipelineError as exc:
         blocking.append(str(exc))
-    if "MNQ" not in str(bundle.get("sourceSymbol") or "").upper():
-        blocking.append("SOURCE_SYMBOL_NOT_MNQ")
+    # R102: sourceSymbol は発注先の限月そのもの。連続足 MNQ1! / 別限月は評価に進ませない。
+    sym_ok, sym_reason = contract_month.chart_symbol_matches(bundle.get("sourceSymbol"),
+                                                            bundle.get("sourceFrontContract"))
+    if not sym_ok:
+        blocking.append(sym_reason.split(":", 1)[0])
     if not bundle.get("priceSource"):
         blocking.append("PRICE_SOURCE_MISSING")
     try:
@@ -615,7 +620,7 @@ def _handoff(bundle: Dict[str, Any]) -> Dict[str, Any]:
         return result
     try:
         plan = autotrade_engine.build_management_plan(scenario, bundle,
-                                                      {"NQX_SYMBOL": bundle.get("symbol", "MNQU6")})
+                                                      {"NQX_SYMBOL": bundle.get("symbol", contract_month.symbol())})
     except ValueError as exc:
         result["status"] = "PLAN_REJECTED"
         result["reason"] = str(exc)

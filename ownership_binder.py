@@ -182,8 +182,9 @@ def _bracket_structure(frozen_row: Dict[str, Any], all_orders: list, *, account:
             rows[row_id] = row
     if not rows:
         return "ABSENT", None
-    if len(rows) != 2:
-        return "INCONSISTENT", "only one bracket child remains"
+    partial = len(rows) == 1
+    if len(rows) > 2:
+        return "INCONSISTENT", "more bracket rows than frozen ids"
     opposite = {"BUY": "SELL", "SELL": "BUY"}.get(action, "")
     for row in rows.values():
         if (_account(row) != account or _text(row.get("symbol")) != symbol
@@ -191,6 +192,18 @@ def _bracket_structure(frozen_row: Dict[str, Any], all_orders: list, *, account:
             return "INCONSISTENT", "bracket child account/symbol/action mismatch"
         if _text(row.get("status")).upper() not in broker_status.BROKER_ACTIVE_STATES:
             return "INCONSISTENT", "bracket child is not active"
+    if partial:
+        # R102: 子が 1 本だけ live(例: SL が市場の逆側で置けず TP だけ残った 2026-09-15)。
+        # 親は約定済み(子が live なのは約定後)なので所有は落とさず、保護が欠けていることを
+        # PARTIAL で返す。裸の修復は engine(_guard_naked_position)が同じ周期で行う。
+        (only_row,) = rows.values()
+        if receipts and _text(only_row.get("receipt")) not in receipts:
+            return "INCONSISTENT", "bracket receipt mismatch"
+        parent = _text(frozen_row.get("orderId"))
+        named = _text(only_row.get("brokerParentId"))
+        if named and named != parent:
+            return "INCONSISTENT", "bracket child names another parent"
+        return "PARTIAL", "only one bracket child remains"
     if receipts and sorted(receipts) != sorted(_text(row.get("receipt")) for row in rows.values()):
         return "INCONSISTENT", "bracket receipt mismatch"
     first, second = rows[ids[0]], rows[ids[1]]
@@ -414,7 +427,8 @@ def bind(plan: Dict[str, Any], route_snapshot: Iterable[Dict[str, Any]],
         matched.append({**row, "legId": _text(frozen_row.get("legId")).upper(),
                         "actualEntry": actual_entry})
 
-    if bracket_states and len(bracket_states) == len(matched) and "PRESENT" not in bracket_states:
+    if (bracket_states and len(bracket_states) == len(matched)
+            and not any(state in ("PRESENT", "PARTIAL") for state in bracket_states)):
         # R76: 全脚が構造照合で、しかも子が 1 本も生きていない = ブローカー上にこの建玉と
         # 凍結経路を結ぶものが何も無い。建玉の枚数・方向・平均建値だけでは所有しない。
         return _reason("bracket-verified legs have no live structure on the broker",
@@ -549,10 +563,18 @@ def bind(plan: Dict[str, Any], route_snapshot: Iterable[Dict[str, Any]],
                           if _text(broker_position.get("orderId")) == _text(row.get("orderId"))
                           and _text(broker_position.get("receipt")) == _text(row.get("receipt"))]
         if len(direct_matches) != 1:
+            direct_by_order = [row for row in filled
+                               if _text(broker_position.get("orderId"))
+                               and _text(broker_position.get("orderId")) == _text(row.get("orderId"))]
             # R52: 建玉行が注文との対応を持たないブローカー。約定した脚が 1 本だけなら、
             # その脚が建玉の出所であることはブローカーの注文状態(FILLED)自体が示す。
             # 平均建値の整合を追加で要求する。
-            if (_position_lacks_order_link(broker_position) and len(filled) == 1
+            if (ledger_backed_ownership() and _position_lacks_order_link(broker_position)
+                    and len(direct_by_order) == 1):
+                # R102/R79: 建玉の orderId が台帳の脚と一致 = 自前の送信が出所。receipt(CrossTrade は
+                # 返さない)と平均建値の整合(通過指値は建値が大きく乖離する)は要求しない。
+                direct_matches = direct_by_order
+            elif (_position_lacks_order_link(broker_position) and len(filled) == 1
                     and _avg_entry_consistent(broker_position, order_type, entry, filled,
                                       favorable_limit=favorable_limit)):
                 direct_matches = [filled[0]]
@@ -604,13 +626,21 @@ def bind(plan: Dict[str, Any], route_snapshot: Iterable[Dict[str, Any]],
     continued_full = (isinstance(plan.get("positionOwnership"), dict)
                       and _same_strong_position(plan["positionOwnership"], broker_position,
                                                 raw_identity, generation))
+    direct_by_order = [row for row in filled
+                       if _text(broker_position.get("orderId"))
+                       and _text(broker_position.get("orderId")) == _text(row.get("orderId"))]
     if len(direct_full) != 1 and not continued_full:
         # R52: 同上。両脚 FILLED(注文 ID は束縛済み)+ 枚数一致(上で検証)+ 方向一致
         # (上で検証)+ 平均建値の整合 + 強い建玉 identity(上で検証)で所有する。
         # 2026-09-05 02:09、SHORT 12 @29,556.75(両脚 FILLED)がここで保留になった。
-        if not (_position_lacks_order_link(broker_position) and len(filled) == 2
-                and _avg_entry_consistent(broker_position, order_type, entry, filled,
-                                      favorable_limit=favorable_limit)):
+        # R102/R79: 建玉の orderId が台帳の脚と一致すれば、receipt と平均建値の整合は要求しない
+        # (2026-09-15 15:11、285pt の通過指値で建値が乖離し UNKNOWN に落ちて裸のまま沈黙した)。
+        if (ledger_backed_ownership() and _position_lacks_order_link(broker_position)
+                and len(direct_by_order) == 1):
+            pass                                  # receipt を返さないブローカーだけ(NT8 は従来どおり厳格)
+        elif not (_position_lacks_order_link(broker_position) and len(filled) == 2
+                  and _avg_entry_consistent(broker_position, order_type, entry, filled,
+                                        favorable_limit=favorable_limit)):
             return _reason("qty2 aggregate position is not bound to a filled split leg",
                            accepted=accepted)
     owned_plan = {**plan, "routeSnapshot": frozen, "positionOwnership": ownership}

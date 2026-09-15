@@ -119,6 +119,7 @@ import msnr_gate  # noqa: E402  (R11-D pure strategy evaluator; never places ord
 import autotrade_arm  # noqa: E402  (session-scoped arming ledger)
 import autotrade_engine  # noqa: E402  (explicitly armed execution lifecycle)
 import execution_contract  # noqa: E402  (pure single execution contract)
+import contract as contract_month  # R102: 取引限月の正本  # noqa: E402
 import strategy_evidence  # noqa: E402  (canonical strategy matrix envelope)
 import events as econ_events  # noqa: E402  (キャッシュ読取のみ。fetch はしない)
 from telegram_bot import api, esc, load_env, send  # noqa: E402
@@ -474,7 +475,7 @@ def compact(bundle):
     # 監視ループが供給しなかった場合、通知は該当ブロックを省略するだけで、
     # 欠損を推測値で埋めることはしない。
     for key in (
-        "priceAt", "priceSource", "sourceSymbol",
+        "priceAt", "priceSource", "sourceSymbol", "sourceFrontContract", "sourceContract",
         "cvdSource", "cvdPane", "cvdTimeframe", "cvdAt",
         "cvdFast", "cvdSlow", "cvdMeta", "cvdAttempts",
         "vix", "vixAt", "vixSource", "vixDelayed",
@@ -922,7 +923,8 @@ def _frozen_preview_url(bundle):
     # 監査用の重い枝(strategyEvidence / ictEvidence / evaluation)は退避 URL に
     # 載せない。凍結プレビューが要るのは「今いくらで、何を見ているか」だけで、
     # 証跡は .secrets の監査コピーと台帳に残っている。
-    keep_top = ("at", "price", "priceAt", "priceSource", "sourceSymbol", "sessionId",
+    keep_top = ("at", "price", "priceAt", "priceSource", "sourceSymbol", "sourceFrontContract",
+                "sourceContract", "sessionId",
                 "vwap", "regime", "scenarios", "watching", "cvd", "cvdMeta",
                 "eventBlackout", "note")
     for bars_keep, levels_keep in ((30, 12), (12, 8), (0, 6), (0, 0)):
@@ -1667,7 +1669,7 @@ def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
             rebuilt = nqx_state.build_scenario(
                 {**demoted, "scenarioId": demoted.get("scenarioId"), "marketCycleId": cycle_id},
                 observed_at=scenario.get("observedAt"),
-                ttl_minutes=SCENARIO_TTL_MIN, symbol=cfg.get("NQX_SYMBOL", "MNQU6"))
+                ttl_minutes=SCENARIO_TTL_MIN, symbol=cfg.get("NQX_SYMBOL", contract_month.symbol()))
         except (ValueError, TypeError):
             rebuilt = {**scenario, "state": "WATCH"}
         if demoted.get("grade") in ("A+", "A", "B"):
@@ -1729,7 +1731,7 @@ def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
         rebuilt = nqx_state.build_scenario(
             {**resized, "scenarioId": resized.get("scenarioId"), "marketCycleId": cycle_id},
             observed_at=scenario.get("observedAt"), ttl_minutes=SCENARIO_TTL_MIN,
-            symbol=cfg.get("NQX_SYMBOL", "MNQU6"), ultra=True)
+            symbol=cfg.get("NQX_SYMBOL", contract_month.symbol()), ultra=True)
     except (ValueError, TypeError) as exc:
         return _demote(f"ultra scenario rebuild failed ({exc})")
     if resized.get("grade") in ("A+", "A", "B"):
@@ -1887,6 +1889,17 @@ def publish_state(bundle):
             f"event blackout ({blackout.get('title')}) — scenario demoted to WATCH")
         chosen = {**chosen, "state": "WATCH"}
 
+    # R102 満期ガード。発注先限月の満期まで contract.lastEntryDaysBeforeExpiry 日未満は
+    # 新規を武装させない(管理・撤退は engine 側でこの判定を見ない)。契約ブロックが
+    # 壊れているときは fail-closed で WATCH に落とす(限月不明のまま送らせない)。
+    try:
+        entry_ok, entry_reason = contract_month.entry_allowed()
+    except contract_month.ContractError as exc:
+        entry_ok, entry_reason = False, f"CONTRACT_INVALID: {exc}"
+    if not entry_ok and str(chosen.get("state", "WATCH")).upper() in ("ACTIVE", "ARMED"):
+        notes.append(f"contract expiry gate ({entry_reason}) — scenario demoted to WATCH")
+        chosen = {**chosen, "state": "WATCH"}
+
     # ボラ予算ゲート。緩衝だけで SL 予算が尽きる相場では武装させない。
     # 封鎖と同じく fail-open(本数不足・設定不備では降格しない)。
     vg = vol_gate(bundle)
@@ -1915,7 +1928,7 @@ def publish_state(bundle):
             {**chosen, "scenarioId": chosen.get("scenarioId"), "marketCycleId": cycle_id},
             observed_at=bundle.get("at"),
             ttl_minutes=SCENARIO_TTL_MIN,
-            symbol=cfg.get("NQX_SYMBOL", "MNQU6"),
+            symbol=cfg.get("NQX_SYMBOL", contract_month.symbol()),
         )
     except (ValueError, TypeError) as exc:
         bundle["_published_scenario"] = None
@@ -1942,7 +1955,7 @@ def publish_state(bundle):
         scenario = nqx_state.build_scenario(
             {**chosen, "scenarioId": chosen.get("scenarioId"), "marketCycleId": cycle_id},
             observed_at=bundle.get("at"), ttl_minutes=SCENARIO_TTL_MIN,
-            symbol=cfg.get("NQX_SYMBOL", "MNQU6"))
+            symbol=cfg.get("NQX_SYMBOL", contract_month.symbol()))
         scenario["executionContract"] = execution_contract.evaluate(
             scenario, market, None, None, cfg=execution_cfg,
             event_blackout=bundle["eventBlackout"])

@@ -34,6 +34,7 @@ sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import autotrade_engine as ae  # noqa: E402
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 ae._read_env_file = lambda path=None: {}          # 本番 .secrets から隔離
 import fill_watch  # noqa: E402
 import management_intent  # noqa: E402

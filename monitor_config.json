@@ -1,6 +1,6 @@
 {
   "schemaVersion": "NQX_MONITOR_PIPELINE/1",
-  "symbol": "MNQU6",
+  "symbol": "MNQZ6",
   "provider": {
     "type": "file",
     "snapshotInputPath": ".secrets/monitor_snapshot.json",

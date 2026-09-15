@@ -1829,6 +1829,23 @@ function intentAccountScope(state, intentHash) {
   return scope;
 }
 
+/**
+ * R102c: authorizedHashes で権威性が取れた intent の **銘柄**。限月の載せ替え判定に使う。
+ */
+function intentSymbol(state, intentHash) {
+  const hash = String(intentHash || "");
+  if (!hash) return null;
+  const claim = state.entryClaim;
+  if (claim && String(claim.executionIntentHash || "") === hash) {
+    return claim.executionIntent?.symbol ? String(claim.executionIntent.symbol) : null;
+  }
+  const mgmt = state.managementClaim;
+  if (mgmt && String(mgmt.managementIntentHash || "") === hash) {
+    return mgmt.managementIntent?.symbol ? String(mgmt.managementIntent.symbol) : null;
+  }
+  return null;
+}
+
 function freshBrokerObservation(state, nowMs, intentHash) {
   const observation = state.brokerObservation;
   const at = parseInstant(observation?.observedAt);
@@ -3081,13 +3098,23 @@ function applyBrokerObservationEvent(state, event, revision, nowMs) {
       ? intentAccountScope(state, checked.observation.currentIntentHash) : null;
     const accountHandoff = Boolean(scope && scope.has(String(prior.accountId))
       && scope.has(String(checked.observation.accountId)));
-    if (!accountHandoff && !(sameAccount && sameSymbol && sameIntent)) {
+    // R102c: 限月の載せ替え。ロール直後、旧限月で置いた claim の不在証明は claim が置かれた
+    // 限月で観測しなければ entryRecoveryProof(observation.symbol == intent.symbol)を通らない。
+    // 先着したのが今の限月の観測だと、同じ intent・同じ口座でも symbol が違うだけで締め出され、
+    // 旧 claim が永久に RECOVERY_UNVERIFIED のまま新規発注を全部止めた(2026-09-15 16:31)。
+    // 載せ替えて安全なのは、intent の権威性が上で検証済みで、同じ口座で、かつ観測の symbol が
+    // **その intent 自身の銘柄**のときだけ。無関係な銘柄は従来どおり拒否する。
+    const claimSymbol = sameIntent && sameAccount && !sameSymbol
+      ? intentSymbol(state, checked.observation.currentIntentHash) : null;
+    const symbolHandoff = Boolean(claimSymbol
+      && String(checked.observation.symbol) === String(claimSymbol));
+    if (!accountHandoff && !symbolHandoff && !(sameAccount && sameSymbol && sameIntent)) {
       return { state, accepted: false, reason: "broker observation cannot overwrite another scope/intent",
         transitions: [] };
     }
-    // 単調性とスナップショット同一性は「同じ口座を連続で観測した」ときの性質。
-    // 別口座の時刻列・snapshotId と突き合わせても意味が無いので、載せ替え時は見ない。
-    if (!accountHandoff) {
+    // 単調性とスナップショット同一性は「同じ口座・同じ銘柄を連続で観測した」ときの性質。
+    // 別口座・別限月の時刻列・snapshotId と突き合わせても意味が無いので、載せ替え時は見ない。
+    if (!accountHandoff && !symbolHandoff) {
       if (observedAt < priorAt) {
         return { state, accepted: false, reason: "broker observation timestamp is not monotonic",
           transitions: [] };
@@ -3544,6 +3571,40 @@ function applyMarketEvent(state, event, revision, nowMs) {
  * 必ず通す。Bot が停止していて transition イベントが来なくても、これで
  * 確実に失効する。
  */
+/**
+ * R102d(2026-09-15): 限月ロール。DO の state.symbol は作成時に固定されるが、Worker の NQX_SYMBOL を
+ * 切り替えて deploy しても文書側は旧限月のままで、新限月の scenario / position / result が
+ * 「symbol does not match」で全部拒否され、ロール後の初回 ARMED で HALT になった(16:44)。
+ * **安全なときだけ**載せ替える: 建玉なし、ENTRY claim が CLAIMED/CONSUMED でない、MANAGEMENT claim が
+ * CLAIMED/CONSUMED でない、blocking な注文が無い。旧限月の scenario / market / brokerObservation /
+ * position / cycle は捨てる(新限月で取り直す。position は null = 照会未確認 = fail-closed)。
+ * 終端した claim と tombstone は残す(同じ tuple を二度送らせない)。
+ */
+export function adoptSymbol(state, symbol, nowMs) {
+  const target = String(symbol || "");
+  if (!state || typeof state !== "object" || !target || String(state.symbol || "") === target) {
+    return { state, adopted: false, reason: null };
+  }
+  const claimState = String(state.entryClaim?.state || "");
+  if (state.entryClaim && (claimState === "CLAIMED" || claimState === "CONSUMED")) {
+    return { state, adopted: false, reason: `entry claim ${claimState}` };
+  }
+  const mgmtState = String(state.managementClaim?.state || "");
+  if (state.managementClaim && (mgmtState === "CLAIMED" || mgmtState === "CONSUMED")) {
+    return { state, adopted: false, reason: `management claim ${mgmtState}` };
+  }
+  const qty = Number(state.position?.qty || 0);
+  if (qty > 0) return { state, adopted: false, reason: `position qty ${qty}` };
+  const orderState = String(state.order?.state || "").toUpperCase();
+  if (state.order && BLOCKING_ORDER_STATES.has(orderState)) {
+    return { state, adopted: false, reason: `order ${orderState}` };
+  }
+  const next = { ...state, symbol: target, scenario: null, market: null, brokerObservation: null,
+    order: null, position: null, positionCheck: null, cycleLeaseExpiresAt: null, rollbackCycleId: null,
+    symbolRoll: { from: state.symbol || null, to: target, at: new Date(nowMs).toISOString() } };
+  return { state: next, adopted: true, reason: null };
+}
+
 export function sweepExpired(state, nowMs) {
   let next = state;
   const transitions = [];

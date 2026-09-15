@@ -15,6 +15,10 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 import msnr_gate  # noqa: E402
+import execution_contract  # noqa: E402
+execution_contract.CONTRACT["contract"] = {  # R102: テストは限月を固定する(ロール後も壊れない)
+    "symbol": "MNQU6", "tvSymbol": "CME_MINI:MNQU2026", "expiry": "2026-09-18",
+    "lastEntryDaysBeforeExpiry": 3}
 
 
 FAILED = []
@@ -160,7 +164,7 @@ def test_broken_optional_1m_raw_does_not_kill_the_3m_route():
                          for i in range(30)]}
     with tempfile.TemporaryDirectory() as tmp:
         for name, payload in (
-            ("chart_state", {"symbol": "CME_MINI:MNQ1!", "resolution": "3"}),
+            ("chart_state", {"symbol": "CME_MINI:MNQU2026", "resolution": "3"}),
             ("bars3m", bars3m), ("bars1m", wrong_1m),
             ("study_3m", {"studies": [{"name": "CVD Unified", "values": {"CVD": "1,000"}}]}),
             ("pine_labels", {"studies": [{"name": "Sessions & VP", "labels": [
@@ -208,7 +212,7 @@ def test_broken_optional_htf_raw_does_not_kill_the_3m_route():
                          for i in range(30)]}
     with tempfile.TemporaryDirectory() as tmp:
         for name, payload in (
-            ("chart_state", {"symbol": "CME_MINI:MNQ1!", "resolution": "3"}),
+            ("chart_state", {"symbol": "CME_MINI:MNQU2026", "resolution": "3"}),
             ("bars3m", bars3m), ("bars4h", wrong_4h),
             ("study_3m", {"studies": [{"name": "CVD Unified", "values": {"CVD": "1,000"}}]}),
             ("pine_labels", {"studies": [{"name": "Sessions & VP", "labels": [

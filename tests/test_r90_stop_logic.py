@@ -25,6 +25,7 @@ import _hermetic  # noqa: E402
 
 BASE = os.path.dirname(HERE)
 sys.path.insert(0, BASE)
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 
 import msnr_gate  # noqa: E402
 import stop_logic  # noqa: E402

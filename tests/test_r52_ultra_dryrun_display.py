@@ -65,7 +65,7 @@ def check(title, ok_expected, args, must=(), must_not=(), count=()):
 # 幾何: SELL 29255.5 / SL 20pt / TP1 36pt / runner 56pt。34枚 → 17/17。
 # 想定損失 34×20×$2 = $1,360。リワード 17×36×2 + 17×56×2 = $3,128 → R:R 1:2.30
 ULTRA = ["--side", "sell", "--qty", "34", "--entry", "29255.5", "--sl", "29275.5",
-         "--split-tp", "29219.5,29199.5", "--ultra"]
+         "--split-tp", "29219.5,29199.5", "--ultra", "--last", "29240"]   # R102: 参照価格(resting 側)
 
 check("ULTRA 34枚: 注文行は qty=17 が2行、qty=1 は出ない",
       True, ULTRA + ["--ultra-drawdown", "2000"],
@@ -84,7 +84,7 @@ check("ULTRA --ultra-drawdown なしはドライランでも止まる",
 # 奇数枚は runnerRemainder=true で端数を runner へ寄せる(33 → 16/17)。表示も同じ。
 check("ULTRA 奇数枚 33 は TP1 16 / RUNNER 17 で表示も一致",
       True, ["--side", "sell", "--qty", "33", "--entry", "29255.5", "--sl", "29275.5",
-             "--split-tp", "29219.5,29199.5", "--ultra", "--ultra-drawdown", "2000"],
+             "--split-tp", "29219.5,29199.5", "--ultra", "--ultra-drawdown", "2000", "--last", "29240"],
       must=["ULTRA: 33枚 → TP1 16枚 / RUNNER 17枚", "※ ULTRA 33枚は TP1 16枚 / RUNNER 17枚"],
       must_not=["qty=1;"], count=[("qty=16;", 1), ("qty=17;", 1)])
 
@@ -96,7 +96,7 @@ check("ULTRA 成行(--last)でも想定損失は滑り緩衝込みで出て落�
 
 check("通常経路 2枚は従来どおり各脚 qty=1",
       True, ["--side", "sell", "--qty", "2", "--entry", "29255.5", "--sl", "29275.5",
-             "--split-tp", "29219.5,29199.5"],
+             "--split-tp", "29219.5,29199.5", "--last", "29240"],
       must=["リスク: $80.00", "リワード: $184.00", "※ 2枚は各1枚の独立OCOブラケット"],
       must_not=["ULTRA:"], count=[("qty=1;", 2)])
 

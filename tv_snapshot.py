@@ -61,6 +61,7 @@ sys.path.insert(0, str(BASE))
 
 import htf_context  # noqa: E402
 import msnr_gate  # noqa: E402  (noise_floor を単一の定義源として再利用する)
+import contract as contract_month  # noqa: E402  (R102: 取引限月の正本)
 
 ET = ZoneInfo("America/New_York")
 TICK = 0.25
@@ -91,6 +92,9 @@ RAW_SOURCE_POLICY = {
     "pine_labels.json": {"required": True, "maxAgeSec": 240},
     "cvd_table.json": {"required": False, "maxAgeSec": 240},
     "quote.json": {"required": False, "maxAgeSec": 240},
+    # R102b: 連続足(MNQ1!)が今どの限月かを示す symbolInfo。連続足のときだけ必須(FRESH でなければ BLOCK)。
+    "symbol_info.json": {"required": False, "maxAgeSec": 240},
+    "symbol_info_15m.json": {"required": False, "maxAgeSec": 240},
     "smt_lines.json": {"required": False, "maxAgeSec": 240},
     "smt_labels.json": {"required": False, "maxAgeSec": 240},
     "smt_alert.json": {"required": False, "maxAgeSec": 240},
@@ -162,7 +166,7 @@ def _load(raw_dir: Path, name: str, required=True):
         raise AcquireError(f"raw input unreadable: {name}: {exc}") from exc
 
 
-def validate_window_layout(layout, state15, state3):
+def validate_window_layout(layout, state15, state3, info15=None, info3=None):
     """固定2pane/3視覚領域の取得元を、値から検証する。
 
     pane_list の active_index は信頼しない。各paneをfocusした直後に保存した
@@ -178,20 +182,25 @@ def validate_window_layout(layout, state15, state3):
         if not row:
             raise AcquireError(f"window layout missing pane {index}")
         symbol = str(row.get("symbol") or "")
-        if "MNQ" not in symbol.upper() or str(row.get("resolution") or "") != resolution:
+        sym_ok, sym_reason = contract_month.chart_symbol_plausible(symbol)
+        if not sym_ok or str(row.get("resolution") or "") != resolution:
             raise AcquireError(
-                f"window pane {index} must be MNQ/{resolution}: "
-                f"{symbol!r}/{row.get('resolution')!r}")
+                f"window pane {index} must be {contract_month.tv_symbol()}/{resolution}: "
+                f"{symbol!r}/{row.get('resolution')!r}"
+                + ("" if sym_ok else f" ({sym_reason})"))
 
-    for label, state, resolution in (("pane 0", state15, "15"),
-                                     ("pane 1", state3, "3")):
+    for label, state, resolution, info in (("pane 0", state15, "15", info15),
+                                           ("pane 1", state3, "3", info3)):
         if not isinstance(state, dict):
             raise AcquireError(f"{label} chart state missing")
         symbol = str(state.get("symbol") or state.get("chart_symbol") or "")
-        if "MNQ" not in symbol.upper() or str(state.get("resolution") or "") != resolution:
+        front = str((info or {}).get("front_contract") or "") if isinstance(info, dict) else ""
+        sym_ok, sym_reason = contract_month.chart_symbol_matches(symbol, front or None)
+        if not sym_ok or str(state.get("resolution") or "") != resolution:
             raise AcquireError(
-                f"{label} state must be MNQ/{resolution}: "
-                f"{symbol!r}/{state.get('resolution')!r}")
+                f"{label} state must be {contract_month.tv_symbol()}/{resolution}: "
+                f"{symbol!r}/{state.get('resolution')!r}"
+                + ("" if sym_ok else f" ({sym_reason})"))
 
     studies = state3.get("studies") or []
     names = [str(item.get("name") or "") for item in studies if isinstance(item, dict)]
@@ -797,11 +806,26 @@ def build_bundle(raw_dir: Path, now=None):
     state = _load(raw_dir, "chart_state.json")
     layout = _load(raw_dir, "pane_layout.json", required=live_acquisition)
     state15 = _load(raw_dir, "chart_state_15m.json", required=live_acquisition)
+    # R102b: 連続足(MNQ1!)は symbolInfo の front_contract で「今どの限月か」を解決する。
+    # 実取得の周期は FRESH な symbol_info だけを信じる(ロール後に前周期の限月を再利用しない)。
+    info3 = _load(raw_dir, "symbol_info.json", required=False)
+    info15 = _load(raw_dir, "symbol_info_15m.json", required=False)
+    info3 = info3 if isinstance(info3, dict) else {}
+    info15 = info15 if isinstance(info15, dict) else {}
+    if live_acquisition:
+        sources = acquisition_receipt.get("sources") or {}
+        if (sources.get("symbol_info.json") or {}).get("status") != "FRESH":
+            info3 = {}
+        if (sources.get("symbol_info_15m.json") or {}).get("status") != "FRESH":
+            info15 = {}
     if live_acquisition or layout is not None or state15 is not None:
-        validate_window_layout(layout or {}, state15 or {}, state)
+        validate_window_layout(layout or {}, state15 or {}, state, info15 or None, info3 or None)
     symbol = str(state.get("symbol") or state.get("chart_symbol") or "")
-    if "MNQ" not in symbol.upper():
-        raise AcquireError(f"sourceSymbol must contain MNQ: {symbol!r}")
+    front = str(info3.get("front_contract") or "") or None
+    # R102: 「MNQ を含む」では連続足 MNQ1! が通る。発注先の限月そのもの(連続足は解決した限月)でなければ BLOCK。
+    sym_ok, sym_reason = contract_month.chart_symbol_matches(symbol, front)
+    if not sym_ok:
+        raise AcquireError(sym_reason)
 
     raw3, confirmed3 = normalize_bars(_load(raw_dir, "bars3m.json"), BAR3_SEC, now_epoch)
     if len(confirmed3) < MIN_BARS_3M:
@@ -825,6 +849,10 @@ def build_bundle(raw_dir: Path, now=None):
 
     # 価格: quote があれば quote、無ければ生の最終足(形成中を含む)の終値。
     quote = _load(raw_dir, "quote.json", required=False) or {}
+    # R102 価格の出所: quote が別銘柄(連続足など)を名乗っていれば使わず、確定足側へ落とす。
+    quote_symbol = str(quote.get("symbol") or "")
+    if quote_symbol and not contract_month.chart_symbol_matches(quote_symbol, front)[0]:
+        quote = {}
     price = _num(quote.get("last") or quote.get("price") or quote.get("lp"))
     if price is None and raw3:
         price = raw3[-1]["c"]
@@ -947,6 +975,8 @@ def build_bundle(raw_dir: Path, now=None):
         "priceAt": now_iso,           # システム時計。足の epoch から作らない
         "priceSource": "TradingView MCP (CDP tab0)",
         "sourceSymbol": symbol,
+        "sourceFrontContract": front,                                   # R102b: 連続足が指す限月
+        "sourceContract": contract_month.resolved_contract(symbol, front),  # 価格の出所(限月そのもの)
         # R37: ピア取得の成否と無関係に取引セッションを識別できるようにする。
         # snapshot 側の sessionId(SMT 窓)は peers があるときだけ入り、
         # index_smt の照合はそちらを使うので競合しない。

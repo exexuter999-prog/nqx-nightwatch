@@ -350,7 +350,7 @@ def test_no_order_calls():
         check(f"{forbidden}() を呼ばない", forbidden not in called)
     check("import するのは読み取り系だけ",
           imported <= {"json", "os", "datetime", "typing", "annotations",
-                       "__future__", "nqx_state", "autotrade_engine", "broker_status",
+                       "__future__", "nqx_state", "autotrade_engine", "broker_status", "contract",
                        # R48: モデル別スコアカード。ローカル jsonl への追記のみで、
                        # ネットワーク・発注系は呼ばない(test_model_scorecard.py 参照)。
                        "model_scorecard",

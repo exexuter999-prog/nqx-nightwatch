@@ -31,6 +31,7 @@ from datetime import datetime, time as dt_time, timezone, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import autotrade_arm
+import contract as contract_month  # R102: 取引限月の正本
 import execution_contract
 import management_intent
 import ownership_binder
@@ -50,6 +51,16 @@ TICK = 0.25
 #: 「TP1 を取った後の runner は最悪でも損にならない」が金額で成立する。
 #: 0.25 の倍数なので tick 丸めで潰れない。
 BREAKEVEN_OFFSET_POINTS = 1.0
+#: R104(2026-09-16 ユーザー決定。R103 は docs/DEVIN_TASKS.md §3-K の流動性狩り対策に先着): 人が置く **決定 ID 単位**の管理上書き。台帳は書き換えない。
+#: `.secrets/management_override.json` = {"schema": "NQX_MANAGEMENT_OVERRIDE/1",
+#:   "overrides": [{"decisionId": "...", "finalTarget": 29137.0, "trailMode": "BREAKEVEN_ONLY"}]}
+#: `finalTarget` は runner 最終 TP(MODIFY の take_profit と最終 TP 到達 FLATTEN の両方)を
+#: 差し替える。TP1 を越えていない値は無視する。`trailMode=BREAKEVEN_ONLY` は TP1 後の
+#: SL を建値±1pt の床にだけ寄せ、極値からのトレールを出さない。凍結プランを読む
+#: `_frozen_plan_record()` の出口で乗せるので、管理・修復・FLATTEN 判定が同じ値を見る。
+MANAGEMENT_OVERRIDE_FILE = os.path.join(BASE, ".secrets", "management_override.json")
+MANAGEMENT_OVERRIDE_SCHEMA = "NQX_MANAGEMENT_OVERRIDE/1"
+TRAIL_MODE_BREAKEVEN_ONLY = "BREAKEVEN_ONLY"
 #: R78: 保護 stop を現在値からどれだけ離して置くか(pt)。`cancelandbracket` は
 #: 取消→新規の 2 段なので、新しい stop が「価格がすでに通過した側」に来ると
 #: ブローカーが拒否し、**取消だけが成立して runner が保護注文ゼロ**で残る
@@ -411,7 +422,7 @@ def build_management_plan(scenario: Dict[str, Any], bundle: Optional[Dict[str, A
         "evidenceHash": str(scenario.get("evidenceHash") or ""),
         "marketCycleId": str(scenario.get("marketCycleId") or ""),
         "decisionId": str(scenario.get("decisionId") or scenario.get("scenarioId") or ""),
-        "symbol": str(scenario.get("symbol") or _setting("NQX_SYMBOL", cfg, "MNQU6")),
+        "symbol": str(scenario.get("symbol") or _setting("NQX_SYMBOL", cfg, contract_month.symbol())),
         "model": scenario.get("_displayModel") or scenario.get("model"),
         "grade": scenario.get("grade"),
         "side": side,
@@ -630,6 +641,14 @@ def _stable_broker_snapshot(position_query, order_query, symbol, frozen_ids,
     return triple
 
 
+def _claim_recovery_symbol(claim_view: Any, current_symbol: str) -> str:
+    """R102c: claim の executionIntent.symbol(無ければ今の限月)。"""
+    intent = claim_view.get("executionIntent") if isinstance(claim_view, dict) else None
+    if isinstance(intent, dict) and str(intent.get("symbol") or "").strip():
+        return str(intent.get("symbol")).strip()
+    return str(current_symbol)
+
+
 def _recover_entry_from_current_broker(claim, journal, position_query,
                                        order_query, symbol):
     """Production R22 startup recovery using a fresh stable broker snapshot."""
@@ -799,16 +818,21 @@ def management_action(plan: Dict[str, Any], position: Dict[str, Any], bundle: Di
     # 従来どおり効くので、価格が建値+1pt へ届いていない周期は単に見送られ、
     # 既存の構造 SL がそのまま残る。
     floor = entry + BREAKEVEN_OFFSET_POINTS if side == "BUY" else entry - BREAKEVEN_OFFSET_POINTS
+    # R104: BREAKEVEN_ONLY は極値からのトレールを出さず、床(建値±1pt)にだけ寄せる。
+    # 床へ寄せた後は `improved` が二度と立たないので、以後の周期は自然に見送りになる。
+    breakeven_only = str(plan.get("trailMode") or "").upper() == TRAIL_MODE_BREAKEVEN_ONLY
     # R78: 「現在値の正しい側」は 1 tick ではなく市場側バッファで判定する。
     # 送信は判定の数秒〜数分後で、その間に価格が stop を跨げば cancelandbracket は
     # 取消だけ成立して runner が裸になる(モジュール先頭 STOP_MARKET_BUFFER_POINTS_DEFAULT)。
     buffer = _stop_market_buffer(cfg)
     if side == "BUY":
-        desired = max(floor, (best - distance) if best is not None else floor)
+        trailed = (best - distance) if best is not None else floor
+        desired = floor if breakeven_only else max(floor, trailed)
         improved = desired > current_stop + TICK / 2
         protective = desired <= price - buffer
     else:
-        desired = min(floor, (best + distance) if best is not None else floor)
+        trailed = (best + distance) if best is not None else floor
+        desired = floor if breakeven_only else min(floor, trailed)
         improved = desired < current_stop - TICK / 2
         protective = desired >= price + buffer
     if not improved:
@@ -847,7 +871,8 @@ def management_action(plan: Dict[str, Any], position: Dict[str, Any], bundle: Di
     return {
         "action": "MODIFY", "qty": qty, "sl": _tick(desired),
         "tp": plan["finalTarget"],
-        "reason": "TP1 reached: breakeven/trailing protection improved",
+        "reason": ("TP1 reached: breakeven only (management override, no trail)" if breakeven_only
+                   else "TP1 reached: breakeven/trailing protection improved"),
     }
 
 
@@ -897,7 +922,18 @@ def _default_fresh_price_query(symbol: str) -> Optional[float]:
         _raw, parsed = tv_fetch._cli_json(["quote"], timeout=20)
     except Exception:  # noqa: BLE001
         return None
-    if "MNQ" not in str(parsed.get("symbol") or "") or "MNQ" not in str(symbol or "MNQ"):
+    # R102: quote は前面チャートの銘柄。発注先の限月そのものでなければ使わない(連続足
+    # MNQ1! が別限月へロールしていた 2026-09-15、建玉管理の参照価格まで別限月になっていた)。
+    try:
+        wanted = symbol if contract_month.normalize_code(str(symbol or "")) else contract_month.symbol()
+    except contract_month.ContractError:
+        return None
+    quote_symbol = str(parsed.get("symbol") or "")
+    front = None
+    if contract_month.is_continuous(quote_symbol):
+        front = str(tv_fetch.chart_symbol_info().get("front_contract") or "") or None
+    resolved = contract_month.resolved_contract(quote_symbol, front)
+    if not resolved or not contract_month.same_contract(resolved, wanted):
         return None
     value = parsed.get("last")
     if value is None:
@@ -927,6 +963,191 @@ def _protective_rows(order_view: Any, side: str, account: Optional[str] = None) 
             continue
         rows.append(row)
     return rows
+
+
+NAKED_GRACE_SEC_DEFAULT = 30.0
+
+
+def _naked_repair_policy(cfg: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """R102: 契約 ``contract.nakedRepair``。壊れていれば OFF(この節だけ止まる)。"""
+    section = (execution_contract.CONTRACT.get("contract") or {}).get("nakedRepair")
+    if not isinstance(section, dict):
+        return {"mode": "OFF", "graceSec": NAKED_GRACE_SEC_DEFAULT}
+    mode = str(section.get("mode") or "OFF").upper()
+    if mode not in ("OFF", "SHADOW", "LIVE"):
+        mode = "OFF"
+    try:
+        grace = float(section.get("graceSec", NAKED_GRACE_SEC_DEFAULT))
+    except (TypeError, ValueError):
+        grace = NAKED_GRACE_SEC_DEFAULT
+    override = _setting("NQX_NAKED_REPAIR", cfg, None)
+    if override is not None and str(override).upper() in ("OFF", "SHADOW", "LIVE"):
+        mode = str(override).upper()
+    return {"mode": mode, "graceSec": max(grace, 0.0)}
+
+
+def _fill_age_seconds(position: Dict[str, Any], now: Optional[datetime]) -> Optional[float]:
+    now = now or datetime.now(timezone.utc)
+    raw = position.get("filledAt") if isinstance(position, dict) else None
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max((now - moment).total_seconds(), 0.0)
+
+
+def _guard_naked_position(*, plan: Dict[str, Any], position: Dict[str, Any], order: Dict[str, Any],
+                          records: List[Dict[str, Any]], plan_key: str, state: Dict[str, Any],
+                          price: Optional[float], noise: Optional[float],
+                          cfg: Optional[Dict[str, str]], symbol: str, account: Optional[str],
+                          open_qty: int, query: Callable[[str], Dict[str, Any]],
+                          broker_order_query: Callable[..., Dict[str, Any]],
+                          claimer: Optional[Callable[[Dict[str, Any]], Tuple[bool, Dict[str, Any]]]],
+                          execute: Callable[[List[str], bool], Tuple[int, str]],
+                          ledger_path: str, live: bool, now: datetime) -> Tuple[bool, List[str]]:
+    """R102: 所有した建玉に保護注文の OCO 組が 1 つも無ければ、同じ周期で SL/TP を張るか撤退する。
+
+    2026-09-15 15:10、限月ずれの通過指値で約定した LONG 2 は SL を置けず(市場の逆側)、TP 2 本
+    だけが残った。engine は所有権 UNKNOWN で 4 周期沈黙し、人が手で SL を置いた。ここでは:
+
+      1. 周期の注文一覧で OCO 組(``broker_status.oco_pairs``)が 0 なら、約定からの経過が
+         ``graceSec`` を超えているときだけ再照会して確かめる(送信直後は子行が見えない)。
+      2. 0 組が確定したら、直前の stop(最後に受理された SL、無ければ初期構造 SL)が現在値の
+         守れる側(市場側バッファ付き)ならそれを、そうでなければ現在値から max(1.0N, buffer)
+         離した価格を SL にし、TP1(無ければ最終 TP)と 1 組で ``--modify --repair-naked`` を送る。
+         TP が現在値の逆側なら FLATTEN。価格が無ければ FLATTEN。
+      3. 送信後はブローカーを再照会し、確認できなければ HALT(無条件リトライしない)。
+
+    戻り値 ``(stop_here, notes)``。stop_here=False なら通常の管理へ進む。
+    mode: OFF=何もしない / SHADOW=判定を注記に出すだけ / LIVE=送る。
+    """
+    import broker_status
+
+    now = now or datetime.now(timezone.utc)          # 本番の reconcile は now を渡さない
+    policy = _naked_repair_policy(cfg)
+    if policy["mode"] == "OFF" or open_qty <= 0:
+        return False, []
+    side = str(plan.get("side") or "").upper()
+    if side not in ("BUY", "SELL") or not isinstance(order, dict) or order.get("verified") is not True:
+        return False, []
+    opposite = "SELL" if side == "BUY" else "BUY"
+    account_label = str(account or position.get("accountId") or position.get("account") or "ACCOUNT_UNKNOWN")
+    pairs, singles = broker_status.oco_pairs(order.get("orders") or [], account=account_label,
+                                             expected_action=opposite, symbol=symbol)
+    if pairs:
+        return False, []
+    age = _fill_age_seconds(position, now)
+    if age is not None and age < policy["graceSec"]:
+        return False, [f"naked check deferred: fill age {age:.0f}s < {policy['graceSec']:g}s grace "
+                       f"(OCO pairs not visible yet)"]
+    try:
+        fresh = _query_orders_with_ids(broker_order_query, symbol, [])
+    except Exception as exc:  # noqa: BLE001
+        return True, [f"autotrade hold: naked check deferred (order query failed: {type(exc).__name__})"]
+    if not isinstance(fresh, dict) or fresh.get("verified") is not True:
+        return True, ["autotrade hold: naked check deferred (protective orders UNVERIFIED)"]
+    pairs, singles = broker_status.oco_pairs(fresh.get("orders") or [], account=account_label,
+                                             expected_action=opposite, symbol=symbol)
+    if pairs:
+        return False, []
+    orphan = len(singles)
+    key = f"{plan_key}:{account_label}:NAKED_REPAIR:{open_qty}"
+    if _latest(records, key, {"MANAGEMENT_SENT", "FLATTEN_SENT", "HALT"}):
+        return True, [f"autotrade hold: naked repair already attempted ({key}); broker OCO only"]
+    buffer = _stop_market_buffer(cfg)
+    previous = _num(state.get("stop")) if _num(state.get("stop")) is not None else _num(plan.get("initialStop"))
+    structural = _tick(previous) if previous is not None else None
+    stop = None
+    if price is not None:
+        protective = structural is not None and (
+            structural >= price + buffer if side == "SELL" else structural <= price - buffer)
+        if protective:
+            stop = structural
+        else:
+            room = max(float(noise or 0.0), buffer)
+            stop = _tick(price - room) if side == "BUY" else _tick(price + room)
+    legs = plan.get("legs") if isinstance(plan.get("legs"), list) else []
+    target = _num((legs[0] or {}).get("target")) if legs else None
+    if target is None:
+        target = _num(plan.get("finalTarget"))
+    target_ok = (target is not None and price is not None
+                 and (target >= price + buffer if side == "BUY" else target <= price - buffer))
+    head = f"NAKED position {side} {open_qty} @{account_label}: 0 OCO pairs, {orphan} orphan protective row(s)"
+    if policy["mode"] == "SHADOW":
+        plan_text = (f"would MODIFY sl={stop} tp={target}" if stop is not None and target_ok
+                     else "would FLATTEN (no protective stop/target can be placed)")
+        return False, [f"naked (shadow): {head}; {plan_text} [not sent]"]
+    if not live:
+        return True, [f"autotrade proposal NAKED_REPAIR: {head}; "
+                      + (f"MODIFY sl={stop} tp={target}" if stop is not None and target_ok else "FLATTEN")]
+    if stop is None or not target_ok:
+        flatten_action = {"action": "FLATTEN", "qty": open_qty, "repair": True, "naked": True,
+                          "reason": f"R102 naked position: no protective stop/target can be placed ({head})"}
+        ok, detail = _execute_action(_command_for_flatten(account), True, execute)
+        if ok:
+            verified, verify_detail = _verify_after_action(query, symbol, "FLATTEN")
+            if verified:
+                _append_ledger({"key": key, "status": "FLATTEN_SENT", "action": flatten_action,
+                                "planEntryKey": plan_key, "plan": plan, "result": detail,
+                                "naked": {"orphanRows": orphan, "price": price}}, ledger_path)
+                return True, [f"autotrade repair NAKED flatten sent: {head}"]
+            detail = verify_detail
+        _append_ledger({"key": key, "status": "HALT", "action": flatten_action,
+                        "planEntryKey": plan_key, "plan": plan,
+                        "reason": f"R102 naked flatten failed: {detail}"}, ledger_path)
+        return True, [f"AUTOTRADE HALT: R102 naked flatten failed: {detail}"]
+    repair_action = {"action": "MODIFY", "qty": open_qty, "sl": stop, "tp": target, "repair": True,
+                     "naked": True, "reason": f"R102 naked position: placing SL/TP ({head})"}
+    generation = _position_generation(position)
+    try:
+        intent = management_intent.build(
+            account_id=position.get("accountId") or position.get("account"), symbol=plan["symbol"],
+            position_generation=generation, side=plan["side"], qty=open_qty,
+            stop=repair_action["sl"], target=repair_action["tp"])
+    except ValueError as exc:
+        return True, [f"AUTOTRADE HALT: R102 naked repair intent invalid ({exc})"]
+    if claimer is None:
+        import nqx_state
+        claimer = nqx_state.claim_management
+    try:
+        claim_ok, claim = claimer(intent)
+    except Exception as exc:  # noqa: BLE001
+        claim_ok, claim = False, {"reason": f"{type(exc).__name__}: {exc}"}
+    if (not claim_ok or not isinstance(claim, dict)
+            or claim.get("managementKey") != management_intent.management_key(intent)
+            or claim.get("managementIntentHash") != management_intent.intent_hash(intent)
+            or not claim.get("claimToken")):
+        return True, [f"AUTOTRADE HALT: R102 naked repair claim unavailable ({claim})"]
+    journal = {"managementKey": claim["managementKey"], "claimToken": str(claim["claimToken"]),
+               "managementIntentHash": str(claim["managementIntentHash"]), "managementIntent": intent}
+    try:
+        _append_ledger({"key": key, "status": "MANAGEMENT_CLAIMED", "action": repair_action,
+                        "planEntryKey": plan_key, "plan": plan,
+                        "managementClaimJournal": journal}, ledger_path)
+    except OSError as exc:
+        return True, [f"AUTOTRADE HALT: R102 naked repair journal failed ({exc})"]
+    args = _command_for_modify(plan, repair_action, generation, claim, account=account, last=price)
+    args.append("--repair-naked")
+    ok, detail = _execute_action(args, True, execute)
+    if ok:
+        verified, verify_detail = _verify_after_action(query, symbol, "MODIFY", plan.get("side"))
+        if verified:
+            _append_ledger({"key": key, "status": "MANAGEMENT_SENT", "action": repair_action,
+                            "planEntryKey": plan_key, "plan": plan, "result": detail,
+                            "managementClaimJournal": journal,
+                            "naked": {"orphanRows": orphan, "price": price}}, ledger_path)
+            return True, [f"autotrade repair NAKED management_sent: SL {stop} / TP {target} placed "
+                          f"for {side} {open_qty} ({orphan} orphan row(s) replaced)"]
+        detail = verify_detail
+    _append_ledger({"key": key, "status": "HALT", "action": repair_action,
+                    "planEntryKey": plan_key, "plan": plan,
+                    "reason": f"R102 naked repair failed: {detail}",
+                    "managementClaimJournal": journal}, ledger_path)
+    return True, [f"AUTOTRADE HALT: R102 naked repair failed: {detail}"]
 
 
 def _repair_unprotected_runner(*, plan: Dict[str, Any], position: Dict[str, Any],
@@ -1205,6 +1426,54 @@ def _run_order(args: List[str], confirm: bool) -> Tuple[int, str]:
     return proc.returncode, detail
 
 
+R102_REJECT_CODES = ("ORDER_SYMBOL_NOT_CONTRACT", "CONTRACT_EXPIRY_NEAR", "CONTRACT_EXPIRED",
+                     "CONTRACT_INVALID", "LAST_SYMBOL_MISMATCH", "LAST_PRICE_DIVERGENT",
+                     "QUOTE_UNAVAILABLE", "ENTRY_LIMIT_THROUGH_MARKET", "STOP_WRONG_SIDE_OF_MARKET",
+                     "CHART_SYMBOL_CONTINUOUS", "CHART_SYMBOL_MISMATCH", "CHART_SYMBOL_MISSING")
+
+
+def _r102_reject_code(detail: Any) -> Optional[str]:
+    """order.py の拒否出力に R102 の拒否コードが含まれていればそれを返す。"""
+    text = str(detail or "")
+    for code in R102_REJECT_CODES:
+        if code in text:
+            return code
+    return None
+
+
+def _contract_entry_guard(plan: Dict[str, Any], bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """R102: 限月の門(claim の**前**)。見送りは HALT でも claim でもない。
+
+    (1) 満期の手前は新規を出さない、(2) プランの symbol が正本の限月である、(3) 価格の出所
+    (bundle.sourceSymbol)が同じ限月である、(4) 指値のとき SL が公開価格の守れる側にある。
+    成行の SL 距離は R90 の _market_stop_guard が見る。契約ブロックが壊れていれば fail-closed。
+    """
+    try:
+        ok, reason = contract_month.entry_allowed()
+        if not ok:
+            return {"block": True, "reason": reason.split(":", 1)[0], "text": reason}
+        if not contract_month.same_contract(str(plan.get("symbol") or ""), contract_month.symbol()):
+            return {"block": True, "reason": "ORDER_SYMBOL_NOT_CONTRACT",
+                    "text": f"plan symbol {plan.get('symbol')} != contract {contract_month.symbol()}"}
+        source = str(bundle.get("sourceSymbol") or (bundle.get("snapshot") or {}).get("symbol") or "")
+        if source:
+            sym_ok, sym_reason = contract_month.chart_symbol_matches(source, bundle.get("sourceFrontContract"))
+            if not sym_ok:
+                return {"block": True, "reason": sym_reason.split(":", 1)[0], "text": sym_reason}
+    except contract_month.ContractError as exc:
+        return {"block": True, "reason": "CONTRACT_INVALID", "text": str(exc)}
+    price = _price_from_bundle(bundle)
+    stop = _num(plan.get("initialStop"))
+    if (str(plan.get("entryOrderType") or "").upper() == "LIMIT" and price is not None
+            and stop is not None):
+        side = str(plan.get("side") or "").upper()
+        wrong = (side == "BUY" and stop >= price) or (side == "SELL" and stop <= price)
+        if wrong:
+            return {"block": True, "reason": "STOP_WRONG_SIDE_OF_MARKET",
+                    "text": f"{side} initialStop {stop} vs price {price} (broker would reject the stop)"}
+    return {"block": False, "reason": None, "text": ""}
+
+
 def _command_for_entry(plan: Dict[str, Any], bundle: Dict[str, Any],
                        entry_key: Optional[str] = None,
                        claim_token: Optional[str] = None,
@@ -1237,6 +1506,16 @@ def _command_for_entry(plan: Dict[str, Any], bundle: Dict[str, Any],
             args += ["--min-stop-pt", str(plan["marketStopMinPt"])]
     else:
         args += ["--entry", str(entry)]
+        if price is not None:
+            # R102: 指値でも参照価格を渡す。order.py は通過指値(ENTRY_LIMIT_THROUGH_MARKET)と
+            # SL の側(STOP_WRONG_SIDE_OF_MARKET)を、この価格か送信直前の quote で検査する。
+            args += ["--last", str(price)]
+    source_symbol = str(bundle.get("sourceContract") or bundle.get("sourceSymbol")
+                        or (bundle.get("snapshot") or {}).get("symbol") or "")
+    if source_symbol and not contract_month.is_continuous(source_symbol):
+        # R102: 価格の出所(限月そのもの)。発注先と別の限月なら order.py が LAST_SYMBOL_MISMATCH で止める。
+        # 連続足のまま解決できていない周期は添えない(order.py の quote 側の門は掛かる)。
+        args += [f"--price-symbol={source_symbol}"]
     if entry_key and claim_token and intent_hash:
         # R52: token/key/hash は `--opt=value` の 1 要素で渡す。`secrets.token_urlsafe`
         # は先頭が `-` になり得て、別要素で渡すと argparse がオプションと誤認して
@@ -1593,8 +1872,86 @@ def _frozen_plan(records: Iterable[Dict[str, Any]], symbol: str,
     return record.get("plan") if record else None
 
 
+def _management_overrides(path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """R104: 管理上書きファイルを decisionId → 上書き の辞書で返す。読めなければ空(=上書きなし)。"""
+    path = path or MANAGEMENT_OVERRIDE_FILE
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema") != MANAGEMENT_OVERRIDE_SCHEMA:
+        return {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in payload.get("overrides") or []:
+        if isinstance(item, dict) and item.get("decisionId") not in (None, ""):
+            result[str(item["decisionId"])] = item
+    return result
+
+
+def apply_management_override(plan: Any, overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> Any:
+    """R104: 凍結プランへ人の上書き(finalTarget / trailMode)を乗せた**コピー**を返す。
+
+    台帳の行は書き換えない。上書きが無い、または decisionId が一致しなければ元の
+    オブジェクトをそのまま返す(呼び出し側は `is` で「乗ったか」を判定できる)。
+    `finalTarget` は TP1 より利益側でなければ無視する(TP1 を越えない runner 最終 TP は
+    分割ブラケットとして成立しない)。乗せた内容は `plan["managementOverride"]` に残す。
+    """
+    if not isinstance(plan, dict):
+        return plan
+    table = _management_overrides() if overrides is None else overrides
+    item = table.get(str(plan.get("decisionId") or ""))
+    if not isinstance(item, dict):
+        return plan
+    updated = json.loads(json.dumps(plan))
+    applied: Dict[str, Any] = {}
+    side = str(plan.get("side") or "").upper()
+    tp1 = _num(plan.get("tp1"))
+    final = _num(item.get("finalTarget"))
+    if final is not None and math.isfinite(final):
+        final = _tick(final)
+        beyond_tp1 = (tp1 is None or (final > tp1 if side == "BUY" else final < tp1))
+        if beyond_tp1:
+            updated["finalTarget"] = final
+            targets = list(updated.get("targets") or [])
+            if targets:
+                targets[-1] = final
+                updated["targets"] = targets
+            for leg in updated.get("legs") or []:
+                if isinstance(leg, dict) and str(leg.get("id") or "").upper() == "RUNNER":
+                    leg["target"] = final
+            applied["finalTarget"] = final
+        else:
+            applied["finalTargetIgnored"] = final
+    mode = str(item.get("trailMode") or "").upper()
+    if mode == TRAIL_MODE_BREAKEVEN_ONLY:
+        updated["trailMode"] = mode
+        applied["trailMode"] = mode
+    if not applied:
+        return plan
+    updated["managementOverride"] = applied
+    return updated
+
+
+def _with_management_override(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """R104: 凍結プラン行の出口。plan に上書きが乗るときだけ行を浅くコピーして差し替える。"""
+    if not record or not isinstance(record.get("plan"), dict):
+        return record
+    plan = apply_management_override(record["plan"])
+    if plan is record["plan"]:
+        return record
+    copied = dict(record)
+    copied["plan"] = plan
+    return copied
+
+
 def _frozen_plan_record(records: Iterable[Dict[str, Any]], symbol: str,
                         account: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    return _with_management_override(_frozen_plan_record_raw(records, symbol, account=account))
+
+
+def _frozen_plan_record_raw(records: Iterable[Dict[str, Any]], symbol: str,
+                            account: Optional[str] = None) -> Optional[Dict[str, Any]]:
     fallback = None
     # R71: 走査は新→旧。建玉が閉じた記録(POSITION_GENERATION open=False)より古い
     # **所有済み**プランは、その建玉がもう無いので凍結プランにしない。
@@ -3276,7 +3633,7 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
 
     proposal = (bundle.get("_published_scenario") or {}) if "_published_scenario" in bundle else (
         (bundle.get("scenarios") or {}).get("primary") or {})
-    symbol = str(proposal.get("symbol") or cfg.get("NQX_SYMBOL") or "MNQU6")
+    symbol = str(proposal.get("symbol") or cfg.get("NQX_SYMBOL") or contract_month.symbol())
     query = broker_query
     if query is None:
         import broker_status
@@ -3598,6 +3955,16 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
         if fresh_price is not None:
             management_bundle = {**bundle, "price": fresh_price, "priceSource": "FRESH_QUOTE"}
         reference_price = fresh_price if fresh_price is not None else _price_from_bundle(bundle)
+        # R102: 裸の建玉(保護注文の OCO 組が 0)は、管理判断の前に同じ周期で直す。
+        naked_stop, naked_notes = _guard_naked_position(
+            plan=plan, position=position, order=order, records=records, plan_key=plan_key,
+            state=state, price=reference_price, noise=_noise_floor(bundle), cfg=cfg, symbol=symbol,
+            account=target_account or None, open_qty=open_qty, query=query,
+            broker_order_query=broker_order_query, claimer=claim_management, execute=execute,
+            ledger_path=ledger_path, live=live, now=now)
+        pyramid_notes = pyramid_notes + list(naked_notes)
+        if naked_stop:
+            return pyramid_notes
         action = management_action(plan, position, management_bundle, state, cfg, now)
         if not action:
             pyramid_ctx["records"] = records
@@ -3608,9 +3975,11 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
                 lambda: _pyramid_consider(pyramid_ctx, plan, position, order,
                                           binding_state=str(binding.get("state") or "")),
                 [])
+            override_notes = ([f"management override: {json.dumps(plan.get('managementOverride'), sort_keys=True)}"]
+                              if isinstance(plan.get("managementOverride"), dict) else [])
             return pyramid_notes + [
                 f"autotrade hold: managed {plan.get('scenarioId') or plan.get('decisionId') or plan_key}"
-            ] + list(considered) + guard_notes
+            ] + override_notes + list(considered) + guard_notes
         if action["action"] == "HALT":
             return [f"AUTOTRADE HALT: {action['reason']}"]
         key = (f"{plan_key}:{target_account or 'ACCOUNT_UNKNOWN'}:{action['action']}:"
@@ -3805,7 +4174,12 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
             return ["autotrade blocked: authoritative ENTRY lock has no durable local claim journal"]
         journal = journal_record["claimJournal"]
         recovery = recover_entry or _recover_entry_from_current_broker
-        recovered, detail = recovery(claim_view, journal, query, broker_order_query, symbol)
+        # R102c(2026-09-15 16:31): 不在証明は **claim が置かれた限月**で観測する。ロール直後に今の
+        # 限月(MNQZ6)で観測すると Worker の entryRecoveryProof(observation.symbol == intent.symbol)が
+        # 通らず、旧限月の claim が毎周期 ENTRY_CLAIM_RECOVERY_UNVERIFIED で新規を全部止めた。
+        # MANAGEMENT の回復(recover_management_from_broker)は元から intent の銘柄で観測している。
+        recovered, detail = recovery(claim_view, journal, query, broker_order_query,
+                                     _claim_recovery_symbol(claim_view, symbol))
         if not recovered:
             # R40: identity を一度も束縛できなかった claim は、DO 側の
             # `entryRecoveryProof` も ACCEPTED 行を必須にするため RECOVER では
@@ -3944,6 +4318,12 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
         if guard.get("minPt") is not None:
             plan = {**plan, "marketStopMinPt": guard["minPt"],
                     "marketStopGuard": {k: v for k, v in guard.items() if k != "text"}}
+    # R102: 限月の門。claim の前(見送りは HALT でも claim でもない)。
+    contract_guard = _contract_entry_guard(plan, bundle)
+    if contract_guard.get("block"):
+        _note_entry_guard(records, entry_key, scenario, contract_guard, ledger_path)
+        return [f"autotrade skip: R102 {contract_guard.get('reason')} — "
+                f"{contract_guard.get('text') or ''}".rstrip(" —")]
     if live:
         claimer = claim_entry
         if claimer is None:
@@ -3986,6 +4366,13 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
         ok = False
         detail = f"live send failed/unknown:\n{detail}"
     if not ok:
+        r102_code = _r102_reject_code(detail) if str(detail).startswith("dry-run rejected:") else None
+        if r102_code:
+            # R102: order.py の限月/価格の門で落ちた = 何も送っていない。HALT にせず見送り(1 回だけ記録)。
+            _note_entry_guard(records, entry_key, scenario,
+                              {"block": True, "reason": r102_code, "text": str(detail)[-300:]},
+                              ledger_path)
+            return [f"autotrade skip: R102 {r102_code} (order.py dry-run) — {str(detail)[-200:]}"]
         if live:
             route_state = _entry_route_state(detail, plan.get("accountScope"))
             if route_state in {"PARTIAL", "UNKNOWN"}:
@@ -4202,7 +4589,7 @@ def _disarmed_single_account_management(
         絶対に出ない(``_reconcile_one`` は建玉が無いときだけ ENTRY へ進み、その場合は
         この関数が None を返している)。
     """
-    symbol = str(proposal.get("symbol") or merged.get("NQX_SYMBOL") or "MNQU6")
+    symbol = str(proposal.get("symbol") or merged.get("NQX_SYMBOL") or contract_month.symbol())
     query = broker_query
     order_query = broker_order_query
     if query is None:
@@ -4342,7 +4729,7 @@ def _reconcile_locked(bundle, state_ok, merged, broker_query, runner, ledger_pat
     if not isinstance(bundle, dict):
         return ["autotrade blocked: bundle is not an object"]
 
-    symbol = str(proposal.get("symbol") or merged.get("NQX_SYMBOL") or "MNQU6")
+    symbol = str(proposal.get("symbol") or merged.get("NQX_SYMBOL") or contract_month.symbol())
     positions = {account: _scoped_position_query(broker_query, symbol, account)
                  for account in accounts}
     unverified_positions = [account for account, value in positions.items()

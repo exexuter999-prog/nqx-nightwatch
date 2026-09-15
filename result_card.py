@@ -21,6 +21,8 @@
 """
 from __future__ import annotations
 
+import contract as contract_month  # R102: 取引限月の正本
+
 import io
 import math
 from datetime import datetime, timezone, timedelta
@@ -220,7 +222,7 @@ def render_png(result: Dict[str, Any], bars: Optional[Sequence[Dict[str, Any]]] 
     entry = float(result["entry"])
     stop = float(result["stop"]) if result.get("stop") is not None else None
     exit_price = float(result["exit"])
-    symbol = str(result.get("symbol") or "MNQU6")
+    symbol = str(result.get("symbol") or contract_month.symbol())
     side_word = "LONG" if derived["dir"] > 0 else "SHORT"
 
     # ---- ヘッダ

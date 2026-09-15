@@ -26,6 +26,7 @@ import _r84_fixtures as fx  # noqa: E402
 
 sys.path.insert(0, fx.BASE)
 import autotrade_engine as ae  # noqa: E402
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 
 ae._read_env_file = lambda path=None: {}
 import broker_status  # noqa: E402

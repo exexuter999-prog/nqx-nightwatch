@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 import autotrade_engine as ae  # noqa: E402
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 import execution_contract  # noqa: E402
 import order  # noqa: E402
 import ownership_binder  # noqa: E402
@@ -339,8 +340,8 @@ check("TP1 後(TP1 の子は消費済み・RUNNER の子は live)→ runner 継�
       res.get("reason"))
 res = ownership_binder.bind(PLAN, SNAPSHOT, position(), view(PAIR1[:1] + PAIR2), route_state="SENT",
                             position_generation=generation(position()))
-check("子が片方だけ残るのは矛盾 → 所有しない", not res["owned"] and "inconsistent" in str(res["reason"]),
-      res.get("reason"))
+check("R102: 子が片方だけ残る脚は PARTIAL(所有は落とさない。裸の修復は engine が同じ周期で行う)",
+      res["owned"] and res["state"] == "OWNED_FULL", res.get("reason"))
 res = ownership_binder.bind(PLAN, SNAPSHOT, position(), view([]), route_state="SENT",
                             position_generation=generation(position()))
 check("全脚の子が 1 本も無ければ所有しない(建玉だけでは結べない)",

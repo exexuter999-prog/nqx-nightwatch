@@ -19,6 +19,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 import autotrade_arm  # noqa: E402
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 import autotrade_engine  # noqa: E402
 import monitor_publish  # noqa: E402
 

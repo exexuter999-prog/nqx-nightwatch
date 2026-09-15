@@ -11,7 +11,7 @@
   tv_snapshot.py は MCP の**生出力だけ**から決定論的にバンドルを組む。
   エージェントの裁量は「どのツールを呼ぶか」だけに縮む。
 
-実チャートで確認した罠(2026-08-24、CME_MINI:MNQ1!):
+実チャートで確認した罠(2026-08-24、CME_MINI:MNQU2026):
   * study 値の負号は U+2212(−)。ASCII の - ではない。
   * 数値は "59,999" のようにカンマ入り文字列。
   * NQX_DATA_*_SOURCE_TIME は ms epoch、bars の time は秒。
@@ -40,6 +40,10 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 import tv_snapshot as TV  # noqa: E402
+import execution_contract  # noqa: E402
+execution_contract.CONTRACT["contract"] = {  # R102: テストは限月を固定する(ロール後も壊れない)
+    "symbol": "MNQU6", "tvSymbol": "CME_MINI:MNQU2026", "expiry": "2026-09-18",
+    "lastEntryDaysBeforeExpiry": 3}
 
 FAILED = []
 
@@ -341,7 +345,7 @@ def write_raw(tmp, **files):
 def test_raw_acquisition_receipt_exposes_reused_files():
     now = datetime.now(timezone.utc).replace(microsecond=0)
     with tempfile.TemporaryDirectory() as tmp:
-        write_raw(tmp, chart_state={"symbol": "CME_MINI:MNQ1!"},
+        write_raw(tmp, chart_state={"symbol": "CME_MINI:MNQU2026"},
                   bars3m={}, study_3m={}, pine_labels={})
         stale_path = Path(tmp) / "chart_state.json"
         stale_epoch = now.timestamp() - 300
@@ -377,7 +381,7 @@ def test_build_is_fail_closed():
         check("理由に symbol が出る", "MNQ" in msg, msg)
 
     with tempfile.TemporaryDirectory() as tmp:
-        write_raw(tmp, chart_state={"symbol": "CME_MINI:MNQ1!"}, bars3m=bars_payload(10),
+        write_raw(tmp, chart_state={"symbol": "CME_MINI:MNQU2026"}, bars3m=bars_payload(10),
                   study_3m={}, pine_labels={})
         msg = expect_blocked("確定足が足りなければ止まる", tmp,
                              now=datetime.fromtimestamp(1000 + 10 * 180, timezone.utc))
@@ -386,11 +390,11 @@ def test_build_is_fail_closed():
 
 def test_window_layout_contract():
     layout = {"panes": [
-        {"index": 0, "symbol": "CME_MINI:MNQ1!", "resolution": "15"},
-        {"index": 1, "symbol": "CME_MINI:MNQ1!", "resolution": "3"},
+        {"index": 0, "symbol": "CME_MINI:MNQU2026", "resolution": "15"},
+        {"index": 1, "symbol": "CME_MINI:MNQU2026", "resolution": "3"},
     ]}
-    state15 = {"symbol": "CME_MINI:MNQ1!", "resolution": "15", "studies": []}
-    state3 = {"symbol": "CME_MINI:MNQ1!", "resolution": "3",
+    state15 = {"symbol": "CME_MINI:MNQU2026", "resolution": "15", "studies": []}
+    state3 = {"symbol": "CME_MINI:MNQU2026", "resolution": "3",
               "studies": [{"name": "CVD Unified"}]}
     TV.validate_window_layout(layout, state15, state3)
     check("固定2pane/3視覚領域を受理", True)
@@ -421,7 +425,7 @@ def test_build_produces_a_usable_bundle():
     with tempfile.TemporaryDirectory() as tmp:
         write_raw(
             tmp,
-            chart_state={"symbol": "CME_MINI:MNQ1!", "resolution": "3"},
+            chart_state={"symbol": "CME_MINI:MNQU2026", "resolution": "3"},
             bars3m=bars,
             study_3m={"studies": [{"name": "CVD Unified", "values": {
                 "CVD": "59,999", "EMA Fast": "62,675", "EMA Slow": "64,783"}}]},

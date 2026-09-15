@@ -22,6 +22,14 @@
 
 - 形成中バーを確定足として扱わない。`at` と価格が古い、欠損、シンボル不一致なら
   新規シナリオを作らない。
+- **限月(R102, 2026-09-15)**: 取引限月の正本は `execution_contract.json` の `contract`(`python contract.py --status`)。
+  チャートは連続足 `MNQ1!` のままでよい。`tv_fetch` が毎周期 TradingView の symbolInfo から MNQ1! が今指す限月
+  (`front_contract`)を解決し、発注先の限月と一致すれば通す。TradingView がロールして食い違った周期は
+  `CHART_SYMBOL_MISMATCH`、解決できない周期は `CHART_SYMBOL_CONTINUOUS_UNRESOLVED` で
+  BLOCK し(限月そのものを表示していれば厳密一致)、`order.py` は発注先限月の参照価格で指値の通過(`ENTRY_LIMIT_THROUGH_MARKET`)と SL の側
+  (`STOP_WRONG_SIDE_OF_MARKET`)を送信前に止める。満期の手前は新規だけ止まる(`CONTRACT_EXPIRY_NEAR`)。
+  所有した建玉に保護注文の OCO 組が 0 なら engine が同じ周期で SL/TP を張るか撤退する(`contract.nakedRepair`)。
+  ロールは FLAT のときに `docs/CONTRACT_ROLL_CHECKLIST.md` の順で。根拠は `docs/R102_CONTRACT_ROLL_GUARD.md`。
 - `VP / ICT / SMT / FVG / DOL / PO3 / CVD` は背景ログではなく、
   `msnr_gate.evaluate()` の候補スコア・モデル選択・根拠として判定に使う。
 - ICT OTE は `rangeTf / rangeStart / rangeEnd / anchorType / freshness / high / low` を持つ
@@ -214,6 +222,17 @@ AUTO OFFは新規ENTRYを止め、FLAT口座に残る未約定ENTRYを取消経�
    当時の `ordStatus` が Working か Suspended かは台帳に残っておらず、従来の照合は
    Suspended の子でも通していた。
 6. セッション時刻での自動全決済は `NQX_AUTOTRADE_SESSION_FLATTEN=1` を明示した場合だけ。
+7. **決定 ID 単位の管理上書き(R104, 2026-09-16 ユーザー決定。R103 は流動性狩り対策 docs/DEVIN_TASKS.md §3-K)**: 凍結プラン(台帳の行)は
+   書き換えない。`.secrets/management_override.json`(`schema=NQX_MANAGEMENT_OVERRIDE/1`、
+   `overrides[]` に `{decisionId, finalTarget, trailMode}`)を `autotrade_engine._frozen_plan_record()`
+   の出口で乗せる(`apply_management_override`)。`finalTarget` は runner 最終 TP を差し替え
+   (MODIFY の take_profit と「最終 TP 到達で FLATTEN」の両方。TP1 を越えない値は無視)、
+   `trailMode=BREAKEVEN_ONLY` は TP1 後の SL を建値±1pt の床にだけ寄せ、極値からのトレールを
+   出さない。乗った内容は hold 注記 `management override: {...}` と plan の `managementOverride`
+   に残る。ファイル欠落・破損・schema 違いは「上書きなし」で周期を止めない。トレードが
+   終わったら行を消す(別の決定には効かないので残っても実害は無い)。初出は 2026-09-16 01:34 の
+   SHORT 6 @29,284.5(TP2 を P:VAL 29,137 へ、TP1 後は BE のみ)。検証は
+   `python tests/test_r103_management_override.py`。
 
 日次ガード(日次損失 −$480 / DAYGOAL / 2連敗 / 損切り後15分冷却)は 2026-08-27 に
 **廃止**した。これらの条件で新規を止めることはもう無い。`dayguard.py` は集計と
@@ -313,6 +332,9 @@ python autotrade_arm.py --status
   なので、これが経路上の最速(実測: 照会 1 本 ≈0.6 秒)。止めるときは `autostart=false` にしてから heartbeat の
   pid を止める。R78 導入後 09-15 まで一度も常駐していなかった(2026-09-11 01:40 に 3 分遅れの建値移動で
   stop が拒否され runner が裸になった)。根拠は `docs/R91_FILL_WATCH_REALTIME.md`。
+- **contract 行(R102)**: `nqx_cycle` は `autotrade:` の次に `contract: MNQU6 (CME_MINI:MNQU2026) exp 2026-09-18 (3d) entry=ok`
+  を出す。`entry=CONTRACT_EXPIRY_NEAR` は新規停止(管理・撤退は続く)。env / wrangler.toml / monitor_config.json の
+  NQX_SYMBOL が正本と食い違えば `HALT: CONTRACT_SYMBOL_DISAGREE` で相場データを取る前に止まる。
 - `broker_status.py --accounts` に `CROSSTRADE_ACCOUNTS` の口座が**出てこない場合は発注しない**。2026-08-21 と 2026-08-24 の二度、設定に残った口座が CrossTrade 側から消えており、気付かずに送っていれば宛先不明で失敗していた。口座は黙って消える。
 - **`LIFELINE_*` は EOD ドローダウンの切り上がりに合わせて毎日手で更新する。** ブローカーからは取得できず、コードにトレーリングの実装も無い。更新漏れは残機の誤認になり、可変枚数を入れた後はそのままサイズ誤りになる。
 - 2回の `broker_status.py --account ... --json` のどちらか一方でも `verified=true` でない、Cloudflare 正本が確認できない、または台帳が壊れている場合は、建玉ゼロと推測しない。そのサイクルは新規・変更を停止し、`HALT` と口座別理由を通知する。

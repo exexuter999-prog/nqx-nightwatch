@@ -201,6 +201,29 @@
     "kind": "MIRRORED",
     "maxAccounts": null
   },
+  "contract": {
+    "_note": "R102(2026-09-15, docs/R102_CONTRACT_ROLL_GUARD.md): 取引限月の正本。symbol は発注先(CrossTrade)の限月コード、tvSymbol は TradingView の同じ限月(連続足 MNQ1! は禁止。チャートが別限月なら tv_snapshot が CHART_SYMBOL_MISMATCH で BLOCK)。expiry は最終取引日(第 3 金曜)。満期まで lastEntryDaysBeforeExpiry 日未満は新規 ENTRY を出さない(管理・撤退は止めない)。next はロール先。ロールは FLAT のときに人が docs/CONTRACT_ROLL_CHECKLIST.md の順で行う(NQX_SYMBOL を持つ env / wrangler.toml / monitor_config.json も同時に変え、python contract.py --status を緑にする)。2026-09-15 15:10 に MNQ1! が 12 月限へロールした値で 9 月限へ 285pt 上の通過指値が飛び、裸建玉になった。",
+    "version": "R102-CONTRACT-1",
+    "symbol": "MNQZ6",
+    "tvSymbol": "CME_MINI:MNQZ2026",
+    "expiry": "2026-12-18",
+    "lastEntryDaysBeforeExpiry": 3,
+    "next": {
+      "symbol": "MNQH7",
+      "tvSymbol": "CME_MINI:MNQH2027",
+      "expiry": "2027-03-19"
+    },
+    "priceProvenance": {
+      "_note": "実装で判明: TradingView CLI/MCP の quote は銘柄引数を無視してアクティブチャートの終値を返すので、発注先限月の quote との basis 比較は常に 0pt で無意味。代わりに価格の出所(チャート銘柄)を全消費点で検査する: tv_snapshot(CHART_SYMBOL_*)、engine の fresh quote(別銘柄は不採用)、order.py(--price-symbol / quote symbol / LAST_PRICE_DIVERGENT)。lastDivergencePt は --last と送信直前 quote の許容乖離(env NQX_LAST_DIVERGENCE_PT)。",
+      "lastDivergencePt": 40
+    },
+    "nakedRepair": {
+      "_note": "R102: 所有した建玉に保護注文の OCO 組が 0 なら同じ周期で SL/TP を 1 組で張る(--modify --repair-naked)か、置けなければ FLATTEN。mode: OFF / SHADOW(注記だけ) / LIVE。graceSec は約定直後に子行が見えない猶予。env NQX_NAKED_REPAIR で一時上書き。",
+      "mode": "LIVE",
+      "graceSec": 30
+    },
+    "_rollNote": "2026-09-15 17:40 JST: MNQ1! が MNQZ2026 を指したので MNQU6 -> MNQZ6 へロール(ユーザー指示)。次は 2027-03-19 満期の MNQH7。"
+  },
   "market": {
     "maxAgeSec": 600,
     "futureToleranceSec": 60

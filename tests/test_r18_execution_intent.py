@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 
 import broker_status  # noqa: E402
 import execution_contract  # noqa: E402
@@ -90,7 +91,7 @@ CFG = {
 # from the DO-frozen intent hash.
 route_calls = []
 argv = ["order.py", "--confirm", "--side", "buy", "--qty", "2",
-        "--entry", "20000.25", "--sl", "19960", "--split-tp", "20040,20080",
+        "--entry", "20000.25", "--sl", "19960", "--split-tp", "20040,20080", "--last", "20010",
         "--entry-key", "ENTRY:" + "a" * 64, "--claim-token", "T" * 43,
         "--intent-hash", execution_intent.intent_hash(INTENT),
         "--plan-version", SCENARIO["planVersion"]]

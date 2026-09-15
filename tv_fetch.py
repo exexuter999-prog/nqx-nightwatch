@@ -42,6 +42,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import contract as contract_month  # R102: 取引限月の正本(連続足 MNQ1! を拒否する)
+
 BASE = Path(__file__).resolve().parent
 RAW_DIR_DEFAULT = BASE / ".secrets" / "tv_raw"
 
@@ -51,6 +53,9 @@ CLI_JS = Path(os.environ.get(
     "NQX_TV_CLI", r"C:\Users\exexu\tradingview-mcp\src\cli\index.js"))
 
 #: 固定画面の不変条件（`docs/R43_ANALYSIS_CONTEXT.md`「固定画面」）。
+#: R102: 銘柄は「MNQ を含む」ではなく **発注先の限月そのもの**(contract.tv_symbol())で
+#: 検査する。連続足 CME_MINI:MNQ1! は 2026-09-15 に 12 月限へロールし、9 月限へ 285pt 上の
+#: 通過指値が飛んだ。EXPECTED_SYMBOL_PART は互換のため残すが検査には使わない。
 EXPECTED_SYMBOL_PART = "MNQ"
 PANE_CONTEXT, PANE_EXECUTION = 0, 1
 STEP_15M, STEP_3M = 900, 180
@@ -148,10 +153,57 @@ def _dominant_step(parsed: Dict[str, Any]) -> Optional[int]:
     return Counter(deltas).most_common(1)[0][0]
 
 
-def _require_window(parsed: Dict[str, Any], expected_resolution: str, where: str) -> None:
+#: R102b: 連続足(MNQ1!)が今どの限月を指しているか。TradingView の datafeed が返す
+#: symbolInfo(mainSeries().symbolInfo())の front_contract を毎周期読む。symbolExt() には無い。
+SYMBOL_INFO_EXPR = (
+    "(function(){var w=window.TradingViewApi._activeChartWidgetWV.value();"
+    "var m=(w.model&&w.model())||(w._chartWidget&&w._chartWidget.model());"
+    "var si=(m.mainSeries().symbolInfo())||{};"
+    "var keys=['name','full_name','pro_name','description','root','front_contract','expiration',"
+    "'typespecs','type','exchange'];var out={};"
+    "keys.forEach(function(k){if(si[k]!==undefined)out[k]=si[k];});return JSON.stringify(out);})()"
+)
+
+
+def chart_symbol_info(timeout: int = 30) -> Dict[str, Any]:
+    """アクティブチャートの銘柄情報(``front_contract`` を含む)。取れなければ ``{}``。"""
+    try:
+        _raw, parsed = _cli_json(["ui", "eval", SYMBOL_INFO_EXPR], timeout=timeout)
+    except AcquisitionError:
+        return {}
+    result = parsed.get("result")
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _write_symbol_info(raw_dir: Path, filename: str) -> Dict[str, Any]:
+    """銘柄情報を raw に逐語保存する。取れなかった周期は**古いファイルを消す**
+    (前周期の front_contract をロール後に再利用させない)。"""
+    info = chart_symbol_info()
+    if info:
+        payload = {"success": True, "fetchedAt": time.time(), **info}
+        _write(raw_dir, filename, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    else:
+        try:
+            (raw_dir / filename).unlink()
+        except FileNotFoundError:
+            pass
+    return info
+
+
+def _require_window(parsed: Dict[str, Any], expected_resolution: str, where: str,
+                    front_contract: Optional[str] = None) -> None:
     symbol = str(parsed.get("symbol") or "")
-    if EXPECTED_SYMBOL_PART not in symbol:
-        raise AcquisitionError(f"{where}: 銘柄が MNQ ではない（{symbol}）")
+    if contract_month.is_continuous(symbol) and not front_contract:
+        # 連続足は「今どの限月か」を添えないと判定できない。呼び出し側が持っていなければここで読む。
+        front_contract = str(chart_symbol_info().get("front_contract") or "") or None
+    ok, reason = contract_month.chart_symbol_matches(symbol, front_contract)
+    if not ok:
+        raise AcquisitionError(f"{where}: {reason}")
     resolution = str(parsed.get("resolution") or "")
     if resolution != expected_resolution:
         raise AcquisitionError(
@@ -200,7 +252,8 @@ def _fetch_context_15m(raw_dir: Path) -> None:
     """左 15m。構造・アンカーを先に固定する（3m の方向へ後付けしない）。"""
     _cli_json(["pane", "focus", str(PANE_CONTEXT)])
     raw, parsed = _cli_json(["state"])
-    _require_window(parsed, "15", "pane 0")
+    info = _write_symbol_info(raw_dir, "symbol_info_15m.json")
+    _require_window(parsed, "15", "pane 0", str(info.get("front_contract") or "") or None)
     _write(raw_dir, "chart_state_15m.json", raw)
 
     _fetch_bars(raw_dir, "bars15m.json", 60, STEP_15M, "15", repair=True)
@@ -254,7 +307,8 @@ def _fetch_execution_3m(raw_dir: Path) -> None:
     """右 3m とその中の CVD study 領域。CVD は第三 pane ではない。"""
     _cli_json(["pane", "focus", str(PANE_EXECUTION)])
     raw, parsed = _cli_json(["state"])
-    _require_window(parsed, "3", "pane 1")
+    info = _write_symbol_info(raw_dir, "symbol_info.json")
+    _require_window(parsed, "3", "pane 1", str(info.get("front_contract") or "") or None)
     names = [str((s or {}).get("name") or "") for s in (parsed.get("studies") or [])]
     if not any("CVD" in n for n in names):
         raise AcquisitionError("pane 1 に CVD Unified が見えない")
@@ -296,8 +350,9 @@ def fetch_cycle(raw_dir: Path = RAW_DIR_DEFAULT, *,
         pane = next((p for p in panes if int(p.get("index", -1)) == index), None)
         if pane is None:
             raise AcquisitionError(f"pane {index} が無い")
-        if EXPECTED_SYMBOL_PART not in str(pane.get("symbol") or ""):
-            raise AcquisitionError(f"pane {index} の銘柄が MNQ ではない")
+        ok, reason = contract_month.chart_symbol_plausible(pane.get("symbol"))
+        if not ok:
+            raise AcquisitionError(f"pane {index}: {reason}")
         if str(pane.get("resolution") or "") != resolution:
             raise AcquisitionError(
                 f"pane {index} の時間足が {pane.get('resolution')}（期待 {resolution}）")

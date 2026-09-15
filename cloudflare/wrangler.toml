@@ -22,7 +22,7 @@ workers_dev = true
 # 口座の入替履歴(封印・評価通過)は TRADING_CONTEXT.md §1 に残す。ここには書かない。
 [vars]
 NQX_ACCOUNT_ID = "lucid-50k-daily"
-NQX_SYMBOL = "MNQU6"
+NQX_SYMBOL = "MNQZ6"
 NQX_ALLOWED_ORIGIN = "https://nqx-nightwatch.pages.dev"
 NQX_AUTOTRADE_MINUTES = "420"                            # AUTO ON から7時間
 NQX_AUTOTRADE_MAX_MINUTES = "720"                        # 連続武装の絶対上限

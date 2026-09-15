@@ -114,10 +114,10 @@ print()
 print("#" * 68)
 print("# 3. SL/TP の向きは現在値を基準に判定")
 print("#" * 68)
-check("買いなのに SL が現在値以上 → 拒否",
+check("買いなのに SL が現在値以上 → 拒否(R102 STOP_WRONG_SIDE_OF_MARKET)",
       False, ["--market", "--side", "buy", "--qty", "2",
               "--sl", "29730", "--last", "29721", "--split-tp", "29740,29750"],
-      must=["買いのSL", "現在値"])
+      must=["STOP_WRONG_SIDE_OF_MARKET"])
 check("売りなのに TP が現在値以上 → 拒否",
       False, ["--market", "--side", "sell", "--qty", "2",
               "--sl", "29750", "--last", "29723", "--split-tp", "29760,29740"],
@@ -156,10 +156,10 @@ check("正しい側の指値 + --last → 従来どおり通る(緩衝なし)",
              "--sl", "29725", "--last", "29750", "--split-tp", "29760,29780"],
       must=["リスク: $60.00", "除外 ACC0004", "発注先 ACC0002",
             "order_type=LIMIT;", "[ドライラン]"])
-check("--last を渡さない指値は従来どおり(後方互換)",
-      True, ["--side", "buy", "--qty", "2", "--entry", "29740",
+check("--last も quote も無い指値は QUOTE_UNAVAILABLE で送らない(R102 fail-closed)",
+      False, ["--side", "buy", "--qty", "2", "--entry", "29740",
              "--sl", "29725", "--split-tp", "29760,29780"],
-      must=["リスク: $60.00", "order_type=LIMIT;", "[ドライラン]"])
+      must=["QUOTE_UNAVAILABLE"], must_not=["order_type=LIMIT;", "[ドライラン]"])
 
 print()
 print("#" * 68)
@@ -171,7 +171,7 @@ write_env(SINGLE)
 def test_runner_order_sl_only():
     """Claimless single-runner orders are not part of the R18 entry contract."""
     check("SLのみ・単枚の新規ドライランも拒否",
-          False, ["--side", "buy", "--qty", "1", "--entry", "29740", "--sl", "29710"],
+          False, ["--side", "buy", "--qty", "1", "--entry", "29740", "--sl", "29710", "--last", "29750"],
           must=["SPLIT_PLAN_REQUIRED"], must_not=["order_type=LIMIT;", "[ドライラン]"])
 
 

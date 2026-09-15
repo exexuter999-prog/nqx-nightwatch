@@ -14,6 +14,7 @@ sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, "tests"))
 
 import autotrade_engine as ae  # noqa: E402
+import _pin_contract  # noqa: E402  (R102: 本番の manualHalt と限月をテストから切り離す)
 import execution_intent  # noqa: E402
 import nqx_state  # noqa: E402
 import order  # noqa: E402
@@ -332,11 +333,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
     sandbox = make_sandbox(BASE)
     ok, out = dry_run(sandbox, ["--confirm", "--side", "buy", "--qty", "1",
-                                 "--entry", "20000", "--sl", "19960",
+                                 "--entry", "20000", "--sl", "19960", "--last", "20010",
                                  "--split-tp", "20040,20080"])
     check("order.py live qty=1 rejects before any route", not ok and "FIXED_QTY_REQUIRED" in out, out)
     ok, out = dry_run(sandbox, ["--confirm", "--side", "buy", "--qty", "2",
-                                 "--entry", "20000", "--sl", "19960",
+                                 "--entry", "20000", "--sl", "19960", "--last", "20010",
                                  "--split-tp", "20040,20080"])
     check("direct order.py live requires a DO claim token",
           not ok and "ENTRY_CLAIM_REQUIRED" in out, out)
