@@ -51,6 +51,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -73,6 +74,9 @@ HTF_FILES = {"45m": ("bars45m.json", 2700), "1h": ("bars1h.json", 3600),
 MIN_BARS_3M = 60          # §6.2 step 4 の下限
 RAW_DIR_DEFAULT = ".secrets/tv_raw"
 CVD_HISTORY_PATH = ".secrets/tv_cvd_history.json"
+#: R105: 取引日ごとのセッション VWAP 累積(周期をまたいで持ち越す)。テストは tempdir を渡す。
+VWAP_STATE_PATH = ".secrets/vwap_session_state.json"
+VWAP_STATE_VERSION = 1
 CVD_HISTORY_KEEP = 12
 
 ACQUISITION_RECEIPT_VERSION = "NQX_ACQUISITION_RECEIPT/1"
@@ -528,6 +532,135 @@ def session_vwap(bars, now_epoch):
     return round(vwap, 2), round(vwap - sigma, 2), round(vwap + sigma, 2)
 
 
+# ── R105: セッション VWAP の累積を周期をまたいで持ち越す ────────────────────
+#
+# tv_fetch は 3 分足を 240 本(12 時間)しか取らない。``session_vwap`` は窓の中のアンカー以降の
+# 足だけを積むので、06:00 ET(19:00 JST)以降は窓がアンカー(18:00 ET)に届かず、「直近 12 時間の
+# VWAP」に退化していた(2026-09-16 実測: NY 時間帯で真のセッション VWAP と 9.5〜16pt のずれ)。
+# ここでは (Σ v·hlc3, Σ v, Σ v·hlc3² のオフセット付き) を取引日ごとに `.secrets` へ保存し、
+# 毎周期は前回より新しい確定足だけを足す。窓の長さに依存しない。
+#
+#   * 欠損(前回の最終足と今回の最初の足が連続していない)は ``gapBars`` に数え、
+#     ``complete=False`` にする。推測で埋めない。判定側(R90 の VWAP 逃がし)は complete でない
+#     VWAP を使わない(VWAP_PARTIAL)。表示には値を出す。
+#   * アンカーが変わった(新しい取引日 / 別の限月)ら窓から新規に始める。窓がアンカーに届いて
+#     いなければ、その前の足は ``gapBars`` として不完全のまま。
+#   * 状態ファイルが読めない・書けないときは窓だけの値(従来どおり)で ``source=WINDOW_ONLY``。
+
+
+def _vwap_state_load(path):
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("version") != VWAP_STATE_VERSION:
+        return None
+    try:
+        state = {"version": VWAP_STATE_VERSION, "anchorT": int(raw["anchorT"]),
+                 "symbol": raw.get("symbol") or None,
+                 "firstT": int(raw["firstT"]), "throughT": int(raw["throughT"]),
+                 "bars": int(raw["bars"]), "gapBars": int(raw.get("gapBars") or 0),
+                 "offset": float(raw["offset"]), "pv": float(raw["pv"]), "vv": float(raw["vv"]),
+                 "pvc": float(raw["pvc"]), "pv2c": float(raw["pv2c"])}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if state["vv"] <= 0 or state["bars"] <= 0 or state["throughT"] < state["firstT"]:
+        return None
+    return state
+
+
+def _vwap_state_save(path, state):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+    os.replace(tmp, target)
+
+
+def _vwap_state_add(state, rows):
+    for b in rows:
+        hlc3 = (b["h"] + b["l"] + b["c"]) / 3.0
+        vol = max(0.0, float(b.get("v") or 0.0))
+        d = hlc3 - state["offset"]
+        state["pv"] += hlc3 * vol
+        state["vv"] += vol
+        state["pvc"] += d * vol
+        state["pv2c"] += d * d * vol
+    if rows:
+        state["throughT"] = int(rows[-1]["t"])
+        state["bars"] += len(rows)
+
+
+def _vwap_state_new(anchor, rows, symbol):
+    first = rows[0]
+    state = {"version": VWAP_STATE_VERSION, "anchorT": int(anchor), "symbol": symbol or None,
+             "firstT": int(first["t"]), "throughT": int(first["t"]), "bars": 0,
+             # 窓がアンカーに届いていなければ、その手前の足は欠損として数える。
+             "gapBars": max(0, int(round((int(first["t"]) - int(anchor)) / BAR3_SEC))),
+             "offset": (first["h"] + first["l"] + first["c"]) / 3.0,
+             "pv": 0.0, "vv": 0.0, "pvc": 0.0, "pv2c": 0.0}
+    _vwap_state_add(state, rows)
+    return state
+
+
+def session_vwap_accumulate(bars, now_epoch, state_path, symbol=None):
+    """取引日(ET 18:00 起点)のセッション VWAP を、状態ファイルで周期をまたいで累積する(R105)。
+
+    返り値(足が無ければ ``vwap`` 等は None):
+      vwap / vwap_lo / vwap_hi(±1σ)/ anchorT / firstT / throughT / bars / pv / vv /
+      complete(アンカーの足から欠損なく積めている)/ gapBars / source
+      (``SESSION_ACCUMULATED`` = 状態ファイルに保存できた、``WINDOW_ONLY`` = 保存できず窓だけ)
+    """
+    anchor = session_vwap_anchor(now_epoch)
+    out = {"vwap": None, "vwap_lo": None, "vwap_hi": None, "anchorT": anchor, "firstT": None,
+           "throughT": None, "bars": None, "pv": None, "vv": None, "complete": None,
+           "gapBars": None, "source": None}
+    rows = sorted((b for b in (bars or []) if b.get("t") is not None and int(b["t"]) >= anchor),
+                  key=lambda b: int(b["t"]))
+    if not rows:
+        return out
+    state = _vwap_state_load(state_path) if state_path else None
+    reset_reason = None
+    if state is None:
+        reset_reason = "NO_STATE"
+    elif state["anchorT"] != anchor:
+        reset_reason = "NEW_SESSION"
+    elif symbol and state.get("symbol") and state["symbol"] != symbol:
+        reset_reason = "SYMBOL_CHANGED"
+    elif int(rows[-1]["t"]) < state["throughT"]:
+        reset_reason = "WINDOW_BEHIND_STATE"          # 時計が戻った/別の足列。信じない
+    if reset_reason:
+        state = _vwap_state_new(anchor, rows, symbol)
+    else:
+        if symbol and not state.get("symbol"):
+            state["symbol"] = symbol                # 銘柄が後から分かったら覚える(次周期の変更検出用)
+        new_rows = [b for b in rows if int(b["t"]) > state["throughT"]]
+        if new_rows:
+            expected = state["throughT"] + BAR3_SEC
+            if int(new_rows[0]["t"]) > expected:
+                state["gapBars"] += int(round((int(new_rows[0]["t"]) - expected) / BAR3_SEC))
+            _vwap_state_add(state, new_rows)
+    source = "WINDOW_ONLY"
+    if state_path:
+        try:
+            _vwap_state_save(state_path, state)
+            source = "SESSION_ACCUMULATED"
+        except OSError:
+            source = "WINDOW_ONLY"
+    if state["vv"] <= 0:
+        return out
+    mean_c = state["pvc"] / state["vv"]
+    vwap = state["offset"] + mean_c
+    var = max(0.0, state["pv2c"] / state["vv"] - mean_c * mean_c)
+    sigma = math.sqrt(var)
+    complete = (state["firstT"] <= anchor + BAR3_SEC) and state["gapBars"] == 0
+    out.update({"vwap": round(vwap, 2), "vwap_lo": round(vwap - sigma, 2), "vwap_hi": round(vwap + sigma, 2),
+                "firstT": state["firstT"], "throughT": state["throughT"], "bars": state["bars"],
+                "pv": state["pv"], "vv": state["vv"], "complete": bool(complete),
+                "gapBars": state["gapBars"], "source": source, "reset": reset_reason})
+    return out
+
+
 # ── CVD ──────────────────────────────────────────────────────────────────
 
 def cvd_bias_from_table(table_payload):
@@ -788,7 +921,7 @@ def normalize_peers(peers_payload, confirmed_3m, now_epoch):
 
 # ── 組み立て ─────────────────────────────────────────────────────────────
 
-def build_bundle(raw_dir: Path, now=None):
+def build_bundle(raw_dir: Path, now=None, vwap_state_path=None):
     live_acquisition = now is None
     now_dt = now or datetime.now(timezone.utc)
     now_epoch = int(now_dt.timestamp())
@@ -872,8 +1005,15 @@ def build_bundle(raw_dir: Path, now=None):
         raise AcquireError("levels empty (pine labels and computed sessions both missing)")
 
     nf = msnr_gate.noise_floor(confirmed3)
-    vwap, vwap_lo, vwap_hi = session_vwap(confirmed3, now_epoch)
-    vwap_state = session_vwap_state(confirmed3, now_epoch)
+    # R105: セッション VWAP は状態ファイルで周期をまたいで累積する(窓の 240 本に依存しない)。
+    # 状態が使えなければ窓だけの値(従来どおり)。complete でなければ判定側は VWAP を使わない。
+    vwap_acc = session_vwap_accumulate(
+        confirmed3, now_epoch,
+        (Path(vwap_state_path) if vwap_state_path is not None else BASE / VWAP_STATE_PATH),
+        symbol=(front or symbol or None))
+    vwap, vwap_lo, vwap_hi = vwap_acc["vwap"], vwap_acc["vwap_lo"], vwap_acc["vwap_hi"]
+    vwap_state = ((vwap_acc["pv"], vwap_acc["vv"], vwap_acc["throughT"], vwap_acc["bars"])
+                  if vwap_acc["vv"] else None)
     cvd, cvd_meta = build_cvd(study3, _load(raw_dir, "cvd_table.json", required=False),
                               price, now_iso, str(BASE / CVD_HISTORY_PATH))
     po3 = classify_po3(confirmed3, price, now_epoch, nf)
@@ -916,6 +1056,11 @@ def build_bundle(raw_dir: Path, now=None):
         "vwapSessionVv": vwap_state[1] if vwap_state else None,
         "vwapThroughT": vwap_state[2] if vwap_state else None,
         "vwapSessionBars": vwap_state[3] if vwap_state else None,
+        # R105: アンカーの足から欠損なく積めているか。False の周期は VWAP を判定に使わない。
+        "vwapComplete": vwap_acc["complete"],
+        "vwapSource": vwap_acc["source"],
+        "vwapGapBars": vwap_acc["gapBars"],
+        "vwapFirstT": vwap_acc["firstT"],
         "cvd": (cvd or {}).get("value"),
         "cvdFast": (cvd or {}).get("fast"), "cvdSlow": (cvd or {}).get("slow"),
     }

@@ -30,6 +30,11 @@
   (`STOP_WRONG_SIDE_OF_MARKET`)を送信前に止める。満期の手前は新規だけ止まる(`CONTRACT_EXPIRY_NEAR`)。
   所有した建玉に保護注文の OCO 組が 0 なら engine が同じ周期で SL/TP を張るか撤退する(`contract.nakedRepair`)。
   ロールは FLAT のときに `docs/CONTRACT_ROLL_CHECKLIST.md` の順で。根拠は `docs/R102_CONTRACT_ROLL_GUARD.md`。
+- **VWAP(R105, 2026-09-16)**: `bundle.vwap` は取引日開始(ET 18:00)アンカーのセッション VWAP(確定 3 分足の
+  hlc3×出来高、±1σ 帯)で、`tv_snapshot` が `.secrets/vwap_session_state.json` に取引日ごとの累積を持ち越して
+  計算する(取得窓 240 本に依存しない)。前周期の最終足と連続していない周期は `vwapComplete=false` になり、
+  R90 の VWAP 逃がしはその周期 `VWAP_PARTIAL` で SL を動かさない。ループを止めた取引日は再開後ずっと
+  `false`(翌 18:00 ET から戻る)。根拠は `docs/R105_SESSION_VWAP_ACCUMULATOR.md`。
 - `VP / ICT / SMT / FVG / DOL / PO3 / CVD` は背景ログではなく、
   `msnr_gate.evaluate()` の候補スコア・モデル選択・根拠として判定に使う。
 - ICT OTE は `rangeTf / rangeStart / rangeEnd / anchorType / freshness / high / low` を持つ
