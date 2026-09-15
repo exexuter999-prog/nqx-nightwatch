@@ -21,9 +21,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-BAR_SEC = 180
-POINT_VALUE = 2.0
-POST_EXIT_MIN = 60
+import excursion_metrics
+
+BAR_SEC = excursion_metrics.BAR_SEC
+POINT_VALUE = excursion_metrics.POINT_VALUE
+POST_EXIT_MIN = excursion_metrics.POST_EXIT_MIN
 REENTRY_WINDOW_MIN = 6 * 60
 LEVEL_KEYS = ("C: VAH", "C: VAL", "C: POC", "P: VAH", "P: VAL", "P: POC")
 
@@ -44,55 +46,11 @@ def _r(value: Optional[float], digits: int = 2) -> Optional[float]:
 
 def excursions(trade: Dict[str, Any], bars: List[Dict[str, float]],
                entry_at: Optional[datetime], closed_at: datetime) -> Dict[str, Any]:
-    """MAE / MFE / 効率 / 保有時間 / 決済後 60 分。足が無ければ空 dict。"""
-    side = str(trade.get("side") or "").upper()
-    entry, exit_price = _f(trade.get("entry")), _f(trade.get("exit"))
-    stop, tp1 = _f(trade.get("stop")), _f(trade.get("tp1"))
-    qty = int(trade.get("qty") or 0)
-    pnl = _f(trade.get("pnlNet"))
-    if side not in ("SHORT", "LONG") or entry is None or not bars:
-        return {}
-    close_ts = closed_at.timestamp()
-    entry_ts = entry_at.timestamp() if entry_at else None
-    # 建玉時刻が不明(手動建玉など)なら保有区間が分からないので MAE/MFE は出さない(推測しない)。
-    held = ([b for b in bars if b["t"] + BAR_SEC > entry_ts and b["t"] < close_ts]
-            if entry_ts is not None else [])
-    out: Dict[str, Any] = {}
-    if held:
-        hi, lo = max(b["h"] for b in held), min(b["l"] for b in held)
-        if side == "SHORT":
-            mae_pt, mfe_pt = max(0.0, hi - entry), max(0.0, entry - lo)
-        else:
-            mae_pt, mfe_pt = max(0.0, entry - lo), max(0.0, hi - entry)
-        risk_pt = abs(entry - stop) if stop is not None else None
-        mfe_usd = mfe_pt * POINT_VALUE * qty
-        out.update({
-            "mae_pt": _r(mae_pt), "mfe_pt": _r(mfe_pt),
-            "mae_usd": _r(mae_pt * POINT_VALUE * qty, 0), "mfe_usd": _r(mfe_usd, 0),
-            "mae_r": _r(mae_pt / risk_pt, 2) if risk_pt else None,
-            "mfe_r": _r(mfe_pt / risk_pt, 2) if risk_pt else None,
-            "efficiency": _r(pnl / mfe_usd, 2) if (pnl is not None and mfe_usd > 0) else None,
-            "bars_held": len(held),
-        })
-    if entry_ts is not None:
-        out["hold_min"] = _r((close_ts - entry_ts) / 60.0, 1)
-    post = [b for b in bars if close_ts <= b["t"] < close_ts + POST_EXIT_MIN * 60]
-    if post and exit_price is not None:
-        hi, lo = max(b["h"] for b in post), min(b["l"] for b in post)
-        if side == "SHORT":
-            fav, adv = max(0.0, exit_price - lo), max(0.0, hi - exit_price)
-        else:
-            fav, adv = max(0.0, hi - exit_price), max(0.0, exit_price - lo)
-        out["post60_fav_pt"], out["post60_adv_pt"] = _r(fav), _r(adv)
-        if tp1 is not None:
-            reached = None
-            for b in post:
-                hit = (b["l"] <= tp1) if side == "SHORT" else (b["h"] >= tp1)
-                if hit:
-                    reached = _r((b["t"] + BAR_SEC - close_ts) / 60.0, 0)
-                    break
-            out["tp1_after_exit_min"] = reached
-    return out
+    """MAE / MFE / 効率 / 保有時間 / 決済後 60 分。足が無ければ空 dict。
+
+    R103-0 で計算本体を ``excursion_metrics`` へ移した。出力は従来どおり。
+    """
+    return excursion_metrics.excursions(trade, bars, entry_at, closed_at)
 
 
 # ---------------------------------------------------------------- 決済の種類
