@@ -7,8 +7,12 @@
 `python verify_r119_live.py`(すべて読むだけ)。
 
 **この文書は「実装が完成した」ことと「損益が改善した」ことを分けて書く。** §6 が実装、
-§7 が測定、§9 が未達。導入時の既定は **mode=SHADOW / targets=OFF / participation=OFF**
-= 記録だけで注文判断を一切変えない。
+§7 が TURTLE 停止時の初回測定、§9 が未達、**§11 が TURTLE 復活後の A/B/C 比較と判断**。
+
+現行の設定(2026-09-19 時点):
+`ictStdv.mode = SHADOW` / `targets.mode = OFF` / `participation.mode = OFF`
+= **記録だけで注文判断を変えない**。`modelGate.disabled = []`(TURTLE 復活、ユーザー承認)。
+**TURTLE 復活は本番反映済み、STDV TARGETS は未採用。** 混ぜて扱わない(§11.5)。
 
 ## 1. 採用仕様表(出典の規則 / Nightwatch 用に決めた規則)
 
@@ -118,9 +122,13 @@ TP が実際に差し替わった候補だけ `stdvIdentity` が付き、`setup_
 * 回帰 — 隔離コピー(`.secrets` 抜き・通信遮断)で `tests/run_all.py` 127 ファイル、失敗は
   `test_r118_gateway_integration.py` の 1 件のみで、これは R121 以前からの既存失敗
 
-## 7. 測定した効果(2026-08-15 → 09-18、監査バンドル 1358 本)
+## 7. 測定した効果(**TURTLE 停止時**の初回測定。現行は §11)
 
-`python replay_ict_stdv.py --replay`。差し替えるのは `ict_stdv_policy` だけで、
+> **この節は 2026-09-19 の TURTLE 復活より前の測定**で、`modelGate` が
+> `TURTLE_SOUP_REVERSAL` を `ALL` で止めていた状態のもの。STDV の担い手が primary に
+> 届かず 4 条件が同値だった経緯を残すために置いてある。**現行設定での比較は §11。**
+
+2026-08-15 → 09-18、監査バンドル 1358 本。`python replay_ict_stdv.py --replay`。差し替えるのは `ict_stdv_policy` だけで、
 riskCap / stopLogic / limitGate は契約の実値。約定規則は `entry_depth.simulate`
 (確定 3 分足・指値 1tick 突き抜け・約定前 TP1 で取消・同じ足は SL 優先・指値待ち 30 分)。
 
@@ -222,3 +230,118 @@ python replay_ict_stdv.py --replay --reevaluate
 * Worker のデプロイは不要(Python 側だけで完結)。
 * SL / 建値 / 枚数 / 口座別上限 / R119 / AUTO / 所有権 / 発注前検査は一切触っていないので、
   この節を OFF にしても他の挙動は変わらない。
+
+## 11. A/B/C 比較と TURTLE 復活(2026-09-19 ユーザー承認)
+
+ユーザーが 2026-09-14 の `TURTLE_SOUP_REVERSAL` ALL 停止判断を更新し、**復活を承認**した。
+`modelGate.disabled` を `[]` にした(他モデルの停止設定・リスク上限・R119 ゲートは変更なし)。
+
+比較は `python replay_ict_stdv.py --replay`。**同条件** —— 同じ監査バンドル 1358 本
+(2026-08-15 → 09-18)、契約の実値(riskCap / stopLogic / limitGate / entryDepth / ultra)、
+`entry_depth.simulate` の同じ約定規則、同じ逐次 1 建玉制約、R は計画の SL 幅。
+差し替えるのは `model_gate_rules` と `ict_stdv_policy` の**2 つだけ**。
+
+| 変種 | modelGate | ictStdv |
+|---|---|---|
+| A_NOW | TURTLE ALL 停止(= 比較時点の本番) | mode=SHADOW / targets=OFF |
+| B_TURTLE | 停止なし | mode=SHADOW / targets=OFF |
+| C_STDV | 停止なし | mode=LIVE / **targets=LIVE** |
+| C_RUNNER(参考) | 停止なし | targets=LIVE + `-4` + runnerEligible |
+
+### 11.1 逐次(同時 1 建玉。結論はここ)
+
+| 条件 | 取った | 約定 | TP1到達 | 損切り | ΣR | 最大DD |
+|---|---|---|---|---|---|---|
+| A_NOW | 36 | 20 | 7 | 11 | **+4.80** | −4.97R |
+| B_TURTLE | 36 | 20 | 8 | 10 | **+6.71** | −3.97R |
+| C_STDV | 37 | 21 | 9 | 10 | **+7.71** | −3.97R |
+| C_RUNNER | 39 | 22 | 10 | 10 | +8.75 | −3.97R |
+
+**効果の分離**: TURTLE 復活 = B − A = **+1.92R** / STDV の追加 = C − B = **+0.99R** /
+runner 許可の追加 = +1.04R。
+
+### 11.2 型別(先回り指値型 / リテスト保持型)
+
+| 条件 | 先回り指値型 | リテスト保持型 | その他モデル |
+|---|---|---|---|
+| A_NOW | — | n=5 ΣR **−0.12** | n=15 ΣR +4.92 |
+| B_TURTLE | n=2 ΣR **−0.08** | n=3 ΣR **+1.88** | n=15 ΣR +4.92 |
+| C_STDV | n=2 ΣR −0.08 | n=4 ΣR **+2.87** | n=15 ΣR +4.92 |
+| C_RUNNER | n=3 ΣR +0.96 | n=4 ΣR +2.87 | n=15 ΣR +4.92 |
+
+**復活の利益はリテスト保持型から出ている。先回り指値型は n=2 で −0.08R、寄与していない。**
+その他モデル(VP80 / OTE / BREAKER)の ΣR +4.92 は 4 条件で不変 —— 復活も STDV も
+既存モデルの成績を動かしていない。
+
+### 11.3 不都合な結果もそのまま
+
+* **セットアップ単位では復活が符号違い**: A −0.42R → B **−0.74R**。逐次(+1.92R)と逆。
+  セットアップ単位は実運用で持てない並行トレードまで数えるので結論は逐次で語るが、
+  **2 つの見方で符号が違うことは弱さである**。
+* **bootstrap の区間が 0 を跨ぐ**: B vs A は −0.003R/setup [−0.10, +0.10]、P(improve)=**0.49**。
+  C vs A は +0.032R/setup [−0.07, +0.14]、P(improve)=0.70。**どれも有意ではない。**
+* **1 件依存**: C_STDV の ΣR +7.71 は最大勝ちを除くと +3.52 に落ちる。差の +0.99R や
+  +1.92R は 1 トレードの大きさと同程度。
+* **holdout が無い**: 前 70% の区間は n=1。後 30% で A +5.11 → B +7.03 → C +8.03 と順序は
+  同じだが、**規則選定に使っていない期間の独立検証にはなっていない**。
+* **費用が入っていない**: `entry_depth.simulate` は手数料も滑りも入れない。片道 $5 の口座で
+  SL 幅 20pt なら 1 往復で約 0.25R。C_STDV は A より 1 トレード多いので、**STDV の +0.99R は
+  費用を引くと約 +0.74R 相当**。TURTLE 復活は取引数が同じ(36)なので費用差はほぼ無い。
+* **MFE/MAE は未取得**(この再生器が返さない)。実トレードの値は
+  `python model_scorecard.py --excursions`。
+
+### 11.4 STDV が最終 decision まで届いた実例
+
+TURTLE 復活後、STDV アンカーが primary に載った周期は **A_NOW 5 → B_TURTLE 89 → C_STDV 92**
+(A はすべて OTE_FVG_PULLBACK。TURTLE が停止していたため)。そのうち **TP が実際に
+差し替わった周期は 12**(C_STDV)で、**別セットアップは 3 件**。
+
+**例 1 — TP1 が近くなった(08-27 23:10 JST)**
+
+| | Entry | SL | TP1 | runner |
+|---|---|---|---|---|
+| B_TURTLE | 29,500.00 | 29,518.00 | 29,432.25(R 3.76) | 29,207.00(R 16.28) |
+| C_STDV | 29,500.00 | 29,518.00 | **29,450.50**(R 2.75) | 29,207.00(R 16.28) |
+
+STDV の `−2`(29,450.50)が既存 TP1 より近いので TP1 になった。**Entry / SL は不変**、
+runner も不変。`decisionId` は `597b99a2cafb931c` → `a8035c4dc31edee2` に変わっている
+(TP が変わったので同一性も変える規律どおり)。アンカーは
+`p0=29,497.5 / p1=29,521.0`(SELL)。**R は 3.76 → 2.75 に下がった** —— STDV は遠い TP を
+正当化するのではなく、近い TP を供給した。
+
+**例 2 — 目標が無かった候補に梯子ができた(09-11 15:25〜15:37 JST、同一セットアップ)**
+
+| | primary | Entry | SL | TP |
+|---|---|---|---|---|
+| B_TURTLE | BREAKER BUY(WATCH) | 29,215.25 | 29,175.25 | `[]` |
+| C_STDV | **TURTLE BUY(ARMED)** | 29,224.50 | 29,201.00 | **[29,271.25, 29,534.50]** |
+
+B では `model_targets` が 2 本の梯子を作れず `[]`(= `TARGET_HEADROOM_INSUFFICIENT` で WATCH)。
+STDV の `−1`(29,271.25)が近い TP1 を供給して梯子が成立し、TURTLE が ARMED になって
+BREAKER を押しのけて primary になった。**Entry / SL が B と違うのは STDV が動かしたからでは
+なく、別の候補が primary になったから**(STDV は Entry/SL に触れない。試験で固定)。
+
+**この 1 セットアップが STDV の +0.99R のほぼ全部である。** WATCH → ARMED の転換は
+C_STDV 全体で **4 周期 = 1 セットアップ**だけだった。
+
+**例 3 — 提示したが WATCH のまま(09-19 01:01〜01:22 JST、7 周期)**
+TURTLE SELL Entry 29,728.75、STDV `−1` = 29,616.50 が TP1 になり梯子は成立したが、
+他のゲートで WATCH のまま。**目標が変わっても発注に至らない**例。
+
+**runner 却下は 36 周期**。`-4` を目標に入れて runner を許した C_RUNNER では却下が 0 になり
+差し替えが 63 周期へ増えるが、これは「TP を遠くしただけ」で計画上の R が伸びる分を含む。
+
+### 11.5 判断
+
+* **TURTLE 復活 → 本番反映済み**(ユーザー承認。`modelGate.disabled: []`)。
+  根拠は逐次 +1.92R と最大 DD の改善(−4.97R → −3.97R)で、利益はリテスト保持型から。
+  **有意ではない**(P(improve)=0.49、セットアップ単位では符号が逆)ことは上に明記した。
+* **STDV TARGETS → 本番採用しない。`targets.mode` は `OFF` のまま。**
+  理由: 逐次 +0.99R のほぼ全部が **1 セットアップ**(09-11 の WATCH→ARMED)由来で、
+  費用(約 0.25R/往復)を引くと +0.74R 相当、bootstrap 区間も 0 を跨ぐ。採用の根拠に足りない。
+  `mode=SHADOW` は継続し、実運用で STDV が primary に載る周期(復活後は再生で 92/1358)を
+  記録する。
+* **participation は未実装。** 配線だけで既定 OFF、LIVE と表示しない。
+* 次に `targets.mode=LIVE` を判断する最小の証拠: TURTLE 復活後の実運用で
+  WATCH→ARMED 転換が **10 セットアップ以上**溜まり、その逐次 ΣR が費用控除後も
+  プラスで、最大勝ちを除いても符号が変わらないこと。

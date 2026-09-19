@@ -541,6 +541,41 @@ def _apply_pool_clearance(model, side, entry, stop, bars, levels, bundle, nf):
     return stop, audit
 
 
+def _compact_stdv_audit(audit):
+    """R121: カード(4096 バイト上限)に載せる分だけ。アンカー全体は載せない。
+
+    載せるのは「どのアンカーで」「投影がどこで」「目標に効いたか」「参加判断」だけ。
+    水準は消費者(目標選択)が実際に見る負の係数に絞る。
+    """
+    if not isinstance(audit, dict):
+        return {}
+    anchor = audit.get("anchor") if isinstance(audit.get("anchor"), dict) else {}
+    read = audit.get("read") if isinstance(audit.get("read"), dict) else {}
+    compact = {key: audit.get(key) for key in
+               ("mode", "targetsMode", "reason", "targetsApplied", "runnerRejected")
+               if audit.get(key) is not None}
+    if anchor:
+        compact["anchorId"] = anchor.get("anchorId")
+        compact["side"] = anchor.get("side")
+        compact["p0"] = anchor.get("p0")
+        compact["p1"] = anchor.get("p1")
+        compact["projectionValid"] = anchor.get("projectionValid")
+        compact["consumedRatios"] = anchor.get("consumedRatios") or []
+        compact["levels"] = {str(row.get("ratio")): row.get("price")
+                             for row in (anchor.get("levels") or [])
+                             if isinstance(row, dict) and (row.get("ratio") or 0) < 0}
+    if audit.get("baseTargets"):
+        compact["baseTargets"] = audit["baseTargets"]
+    if audit.get("targetsOffered"):
+        compact["offered"] = [row.get("price") for row in audit["targetsOffered"]
+                              if isinstance(row, dict)]
+    if read:
+        compact["participation"] = read.get("participation")
+        compact["thesis"] = read.get("thesis")
+        compact["headroom"] = read.get("headroom") or {}
+    return compact
+
+
 def _compact_pool_audit(audit):
     """カード(4096 バイト上限)に載せる分だけ。プールは価格と種別だけ残す。"""
     if not isinstance(audit, dict):
@@ -3901,6 +3936,11 @@ def select_primary(candidates, bundle=None):
         **({"poolStop": _compact_pool_audit(chosen["poolStop"])} if chosen.get("poolStop") else {}),
         # R103-3: 掃引ゲートの監査。OFF ではキーごと無い。
         **({"sweepGate": _compact_sweep_audit(chosen["sweepGate"])} if chosen.get("sweepGate") else {}),
+        # R121: 先回り指値型(restingLimit)と STDV 監査を decision まで運ぶ。前者は
+        # 型別の集計、後者は「最終判断に効いたか」の追跡に要る。無いときはキーを
+        # 足さない(出力を R121 以前と同一に保つ)。
+        **({"restingLimit": True} if chosen.get("restingLimit") else {}),
+        **({"ictStdv": _compact_stdv_audit(chosen["ictStdv"])} if chosen.get("ictStdv") else {}),
         "modelRank": [c["model"] + ":" + str(c.get("grade")) for c in candidates[:4]],
     }
 
@@ -4647,6 +4687,8 @@ def _shrink_card(card):
         # タグはスコアカードの分離キーで、監査は再生で復元できる。
         decision.pop("poolStop", None)
         decision.pop("sweepGate", None)
+        # R121: STDV の監査も SHADOW の記録なので evidence タグより先に落とす。
+        decision.pop("ictStdv", None)
         if _card_bytes(card) <= CARD_MAX_BYTES:
             return card
         decision.pop("modelRank", None)

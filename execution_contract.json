@@ -230,13 +230,8 @@
   "modelGate": {
     "_note": "R89(2026-09-14, docs/R89_MODEL_GATE.md): 武装から外すモデル/型。disabled の各行 {model, variant} に当たる候補は評価・記録はするが primary に選ばない(hardBlockers に MODEL_DISABLED / RESTING_LIMIT_DISABLED を付けて WATCH。別モデルが primary になれる)。variant: ALL = そのモデルの候補すべて / RESTING_LIMIT = MSS 確認後にレベルへ先回りする指値(restingLimit。現状 TURTLE_SOUP_REVERSAL だけが持つ)だけ。空配列 = 何も外さない。不正な行は無視されるので、書き換えたら python tests/test_r89_model_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
     "version": "R89-MODEL-GATE-1",
-    "_decisionNote": "2026-09-14 ユーザー決定: TURTLE_SOUP_REVERSAL を ALL で外した(先回り指値型もリテスト保持型も primary に選ばない)。根拠は docs/R89_MODEL_GATE.md §1。戻すのは disabled を [] にする 1 行。",
-    "disabled": [
-      {
-        "model": "TURTLE_SOUP_REVERSAL",
-        "variant": "ALL"
-      }
-    ]
+    "_decisionNote": "2026-09-19 ユーザー決定: **TURTLE_SOUP_REVERSAL の ALL 停止を解除した(復活)。** 2026-09-14 の停止判断を更新したもの。根拠は docs/R121_ICT_STDV.md §11 の A/B/C 比較 —— 同条件の逐次再生(監査バンドル 1358 本)で停止時 ΣR +4.80 → 復活 +6.71(差 +1.92R)、最大 DD −4.97R → −3.97R。利益は**リテスト保持型**から出ており(ΣR −0.12 → +1.88)、先回り指値型は n=2 で ΣR −0.08 と寄与していない。ただしセットアップ単位では −0.42 → −0.74 で符号が逆になり、bootstrap の区間は 0 を跨ぐ(P(improve)=0.49)。**費用は再生に含まれていない。** 他モデルの停止設定は変えていない(disabled は空)。戻すのは {model: TURTLE_SOUP_REVERSAL, variant: ALL} を 1 行足す。2026-09-14 の停止根拠は docs/R89_MODEL_GATE.md §1。",
+    "disabled": []
   },
   "ictStdv": {
     "_note": "R121(2026-09-19, docs/R121_ICT_STDV.md): ICT Standard Deviation Projections(TTrades 版)。level(r) = p0 + r*(p1-p0) の固定投影。BUY は p0=下降 manipulation の起点高値 / p1=掃引した安値、SELL は鏡像。**リスク倍率 R でも統計 σ でもない。** アンカー源は既存の確定済み SWEEP チェーン(MSS_CONFIRMED / RETEST_HELD)だけで、モデル名で全 BREAKER/TURTLE へ広げない。アンカー確定後は現値が EQ を通っても方向・p0・p1 を変えない(別の掃引は別 anchorId)。mode は OFF / SHADOW=記録のみ / LIVE=候補の参加判断へ反映。targets.mode は別の段で、LIVE のときだけ投影を既存 model_targets の目標候補へ渡す(最小 R・重複除去・runner 選定は既存規則に任せる)。targets.ratios の既定は -1/-2/-2.5 で、**-4 は観測専用**(runner が不当に遠くなるため。runnerEligible=true と明示比較が要る)。participation.mode も別の段で、到達済み目標と残り値幅を参加判断に使う。投影域へ触れたことをハードブロックにはしない。STDV は方向票を持たない(targetOnly=true / 0 票)ので、投影の健全性は valid ではなく projectionValid で持つ。Entry/SL/枚数/口座別上限/R119/AUTO/所有権/発注前検査は一切変えない。保有中の凍結済み TP/SL も変えない。検証は python tests/test_r121_ict_stdv.py / python replay_ict_stdv.py(読むだけ)。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",

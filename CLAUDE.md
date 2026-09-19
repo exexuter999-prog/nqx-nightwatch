@@ -93,8 +93,14 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
 - **モデルゲート(R89, 2026-09-14)**: `execution_contract.json` の `modelGate.disabled` に
   `{model, variant}`(variant = `ALL` / `RESTING_LIMIT`)を書くと、その候補は評価・記録はするが
   primary に選ばれない(`MODEL_DISABLED` / `RESTING_LIMIT_DISABLED` で WATCH。別モデルが primary に
-  なれる)。**2026-09-14 ユーザー決定で `TURTLE_SOUP_REVERSAL` を `ALL` で外した**(戻すのは
-  `disabled` を `[]` にする 1 行)。書き換えたら `python -c "import msnr_gate; print(msnr_gate.model_gate_rules())"`
+  なれる)。**2026-09-19 ユーザー決定で `TURTLE_SOUP_REVERSAL` の `ALL` 停止を解除した(復活)。
+  `disabled` は空で、他モデルの停止設定は無い。** 2026-09-14 の停止判断を更新したもので、根拠は
+  `docs/R121_ICT_STDV.md` §11 の A/B/C 比較 —— 同条件の逐次再生(監査バンドル 1358 本)で
+  停止時 ΣR +4.80 → 復活 +6.71(差 **+1.92R**)、最大 DD −4.97R → −3.97R。利益は**リテスト
+  保持型**から出ており(ΣR −0.12 → +1.88)、先回り指値型は n=2 で −0.08R と寄与していない。
+  **有意ではない** —— セットアップ単位では −0.42 → −0.74 で符号が逆、bootstrap の区間は 0 を
+  跨ぐ(P(improve)=0.49)、費用は再生に含まれていない。止め直すのは
+  `{"model": "TURTLE_SOUP_REVERSAL", "variant": "ALL"}` を `disabled` へ 1 行足す。書き換えたら `python -c "import msnr_gate; print(msnr_gate.model_gate_rules())"`
   で `invalid` が空であることを確かめる(不正な行は黙って無視される)。根拠は `docs/R89_MODEL_GATE.md`。
 - **初期 SL の穴(R90, 2026-09-15)**: 設定は `execution_contract.json` の `stopLogic`、根拠は
   `docs/R90_STOP_LOGIC_HOLES.md`。(1) `vwapClearance`(**LIVE**): VWAP が SL の近く(±1.0N)に
@@ -120,8 +126,13 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   0 票)ので、投影の健全性は `valid` ではなく `projectionValid` で見る。`-4` は観測専用で
   目標に使わない。runner が STDV になる周期は既定で採らず `runnerRejected` を残す。TP が
   差し替わった候補だけ `stdvIdentity` が `setup_identity` に入り decisionId が変わる。
-  **2026-09-19 時点で損益改善は未実証** —— 逐次再生で BASE と同値(`docs/R121_ICT_STDV.md` §7)。
-  担い手がほぼ TURTLE で、それが `modelGate` で停止中のため最終判断に届かない。検証は
+  **STDV TARGETS は本番未採用(`targets.mode=OFF`)。** TURTLE 復活後の A/B/C 比較
+  (`docs/R121_ICT_STDV.md` §11)では、targets を LIVE にすると逐次 ΣR +6.71 → +7.71(+0.99R)
+  になるが、その**ほぼ全部が 1 セットアップ**(09-11 の WATCH→ARMED 転換 4 周期)由来で、
+  費用(片道 $5・SL 20pt で往復 ≈ 0.25R)を引くと +0.74R 相当、bootstrap 区間も 0 を跨ぐ。
+  採用の根拠に足りないので `SHADOW` で記録を続ける。**TURTLE 復活と STDV 採用は別の判断。**
+  `participation` は配線だけで未実装(LIVE と表示しない)。復活後は STDV が primary に載る
+  周期が再生で 92/1358 あり、TP が実際に差し替わるのは 12 周期(別セットアップ 3 件)。検証は
   `python tests/test_r121_ict_stdv.py` / `python replay_ict_stdv.py --replay` /
   `python verify_r119_live.py`(読むだけ)。戻しは各段の `mode` を `OFF` にする 1 語。
 - **指値の門(R119, 2026-09-19 ユーザー決定)**: 設定は `execution_contract.json` の `limitGate`、根拠は

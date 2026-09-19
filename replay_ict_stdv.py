@@ -44,18 +44,30 @@ SECRETS = os.path.join(BASE, ".secrets")
 JST = timezone(timedelta(hours=9))
 
 RATIOS = [-1.0, -2.0, -2.5]
+TURTLE = "TURTLE_SOUP_REVERSAL"
+#: 各変種は `modelGate` と `ictStdv` の**両方**を指定する。A が現行本番。
+#: 「TURTLE 復活の効果」= B - A、「STDV の追加効果」= C - B。混ぜない。
 VARIANTS: Dict[str, Dict[str, Any]] = {
-    "BASE": {"mode": "OFF", "targets": {"mode": "OFF"}, "participation": {"mode": "OFF"}},
-    "SHADOW": {"mode": "SHADOW", "targets": {"mode": "OFF"}, "participation": {"mode": "OFF"}},
-    "TARGETS": {"mode": "LIVE", "targets": {"mode": "LIVE", "ratios": RATIOS,
-                                            "runnerEligible": False},
-                "participation": {"mode": "OFF"}},
-    "TGT_RUN": {"mode": "LIVE", "targets": {"mode": "LIVE", "ratios": RATIOS + [-4.0],
-                                            "runnerEligible": True},
-                "participation": {"mode": "OFF"}},
+    "A_NOW": {"gate": [(TURTLE, "ALL")],
+              "stdv": {"mode": "SHADOW", "targets": {"mode": "OFF"},
+                       "participation": {"mode": "OFF"}}},
+    "B_TURTLE": {"gate": [],
+                 "stdv": {"mode": "SHADOW", "targets": {"mode": "OFF"},
+                          "participation": {"mode": "OFF"}}},
+    "C_STDV": {"gate": [],
+               "stdv": {"mode": "LIVE", "targets": {"mode": "LIVE", "ratios": RATIOS,
+                                                    "runnerEligible": False},
+                        "participation": {"mode": "OFF"}}},
+    "C_RUNNER": {"gate": [],
+                 "stdv": {"mode": "LIVE",
+                          "targets": {"mode": "LIVE", "ratios": RATIOS + [-4.0],
+                                      "runnerEligible": True},
+                          "participation": {"mode": "OFF"}}},
 }
+
+BASELINE = "A_NOW"
 DECISION_KEYS = ("model", "side", "state", "grade", "entry", "stop", "targets", "targetR",
-                 "decisionId", "hardBlockers", "evidence", "ictStdv")
+                 "decisionId", "hardBlockers", "evidence", "ictStdv", "entryMode")
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -101,13 +113,18 @@ def _compact(audit: Any) -> Optional[Dict[str, Any]]:
 
 
 def evaluate_all(paths: List[str]) -> List[Dict[str, Any]]:
+    """変種ごとに `model_gate_rules` と `ict_stdv_policy` を**両方**差し替えて再評価する。
+
+    他の節(riskCap / stopLogic / limitGate / entryDepth / ultra)は契約の実値のまま。
+    """
     import msnr_gate
-    policies = {name: msnr_gate.ict_stdv_policy({"ictStdv": spec})
-                for name, spec in VARIANTS.items()}
-    bad = {n: p["invalid"] for n, p in policies.items() if p["invalid"]}
-    if bad:
-        raise SystemExit(f"変種の指定が不正: {bad}")
-    saved = msnr_gate.ict_stdv_policy
+    policies = {}
+    for name, spec in VARIANTS.items():
+        stdv = msnr_gate.ict_stdv_policy({"ictStdv": spec["stdv"]})
+        if stdv["invalid"]:
+            raise SystemExit(f"{name} の ictStdv 指定が不正: {stdv['invalid']}")
+        policies[name] = {"gate": list(spec["gate"]), "stdv": stdv}
+    saved_gate, saved_stdv = msnr_gate.model_gate_rules, msnr_gate.ict_stdv_policy
     rows: List[Dict[str, Any]] = []
     started = time.time()
     try:
@@ -123,7 +140,9 @@ def evaluate_all(paths: List[str]) -> List[Dict[str, Any]]:
                    "t": int(moment.timestamp()), "price": _finite(bundle.get("price")),
                    "noise": None, "variants": {}}
             for name, policy in policies.items():
-                msnr_gate.ict_stdv_policy = (lambda p=policy: p)
+                msnr_gate.model_gate_rules = (
+                    lambda contract=None, g=policy["gate"]: {"rules": list(g), "invalid": []})
+                msnr_gate.ict_stdv_policy = (lambda p=policy["stdv"]: p)
                 try:
                     result = msnr_gate.evaluate(copy.deepcopy(bundle))
                 except Exception as exc:  # noqa: BLE001 - 再生は落とさず記録する
@@ -133,8 +152,8 @@ def evaluate_all(paths: List[str]) -> List[Dict[str, Any]]:
                     row["noise"] = result.get("noiseFloor")
                 decision = result.get("decision") or {}
                 item = {k: decision.get(k) for k in DECISION_KEYS if k != "ictStdv"}
-                item["ictStdv"] = _compact(decision.get("ictStdv"))
-                # 候補側の STDV も数える(primary にならなかった分の根拠欠損を見るため)
+                item["ictStdv"] = decision.get("ictStdv")
+                item["restingLimit"] = bool(decision.get("restingLimit"))
                 item["candidateStdv"] = [_compact(c.get("ictStdv"))
                                          for c in (result.get("candidates") or [])
                                          if c.get("ictStdv")]
@@ -143,8 +162,35 @@ def evaluate_all(paths: List[str]) -> List[Dict[str, Any]]:
             if index % 100 == 0:
                 print(f"  {index}/{len(paths)} ({time.time() - started:.0f}s)", flush=True)
     finally:
-        msnr_gate.ict_stdv_policy = saved
+        msnr_gate.model_gate_rules, msnr_gate.ict_stdv_policy = saved_gate, saved_stdv
     return rows
+
+
+def _resting_keys(rows: List[Dict[str, Any]], variant: str) -> set:
+    """その変種で `restingLimit` が立っていた (model, side, entry, stop) の集合。
+
+    `replay_stop_logic.setups_for` の `cycles` は決まったキーしか運ばないので、型は
+    こちら側で decision 行から拾う(共有ヘルパを書き換えない)。
+    """
+    out = set()
+    for row in rows:
+        dec = row["variants"].get(variant) or {}
+        if not dec.get("restingLimit"):
+            continue
+        entry, stop = _finite(dec.get("entry")), _finite(dec.get("stop"))
+        if dec.get("model") and entry is not None and stop is not None:
+            out.add((dec["model"], dec.get("side"), entry, stop))
+    return out
+
+
+def _entry_type(setup: Dict[str, Any], resting: set) -> str:
+    """先回り指値型 / リテスト保持型 / その他。型別集計のためだけの分類。"""
+    key = (setup.get("model"), setup.get("side"), setup.get("entry"), setup.get("stop"))
+    if key in resting:
+        return "RESTING_LIMIT"
+    if str(setup.get("model") or "") in {"TURTLE_SOUP_REVERSAL", "BREAKER_CONTINUATION"}:
+        return "RETEST_HELD"
+    return "OTHER"
 
 
 def _r_of(item: Optional[Dict[str, Any]]) -> float:
@@ -175,7 +221,7 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
     subst = 0
     anchor_ids = set()
     for row in rows:
-        for audit in (row["variants"].get("SHADOW") or {}).get("candidateStdv") or []:
+        for audit in (row["variants"].get(BASELINE) or {}).get("candidateStdv") or []:
             if not audit:
                 continue
             if audit.get("projectionValid") is True:
@@ -200,7 +246,7 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
 
     # 2. 目標として実際に使われたか + 無効果だった理由
     print("\n--- 2. 目標投影が候補/最終 decision に使われた件数 ---")
-    for name in ("TARGETS", "TGT_RUN"):
+    for name in ("C_STDV", "C_RUNNER"):
         offered = applied = rejected = primary_applied = 0
         for row in rows:
             var = row["variants"].get(name) or {}
@@ -218,7 +264,7 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
     reasons: collections.Counter = collections.Counter()
     bearer_models: collections.Counter = collections.Counter()
     for row in rows:
-        var = row["variants"].get("SHADOW") or {}
+        var = row["variants"].get(BASELINE) or {}
         bearers = [a for a in (var.get("candidateStdv") or [])
                    if a and a.get("projectionValid") is True]
         if not bearers:
@@ -226,11 +272,13 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
         # decision 側に STDV が載っているかで「primary に届いたか」を数える
         if (var.get("ictStdv") or {}).get("anchorId"):
             bearer_models[str(var.get("model"))] += 1
-    print(f"    primary に届いた周期のモデル: {dict(bearer_models) or '(なし)'}")
-    print("    ※ v1 のアンカー源は確定済み SWEEP チェーンだけなので、担い手はほぼ")
-    print("      TURTLE_SOUP_REVERSAL になる。そのモデルは modelGate で ALL 停止中")
-    print("      (2026-09-14 ユーザー決定)なので、候補としては出るが primary にならない。")
-    print("      = **この標本では TARGETS を LIVE にしても最終判断は変わらない。**")
+    for name in names:
+        reached = collections.Counter()
+        for row in rows:
+            var = row["variants"].get(name) or {}
+            if (var.get("ictStdv") or {}).get("anchorId"):
+                reached[str(var.get("model"))] += 1
+        print(f"    {name:9s} primary に STDV が載った周期: {dict(reached) or '(なし)'}")
 
     # 3. 周期単位の変化(OFF/SHADOW の不変性の検算を含む)
     print("\n--- 3. 周期単位(BASE との差) ---")
@@ -249,7 +297,7 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
                 armed_to_watch += 1
             if vs in {"ARMED", "ACTIVE"} and bs not in {"ARMED", "ACTIVE"}:
                 watch_to_armed += 1
-        flag = "  <= SHADOW は 0 でなければならない" if name == "SHADOW" else ""
+        flag = ""
         print(f"{name:8s} decisionId 変化 {changed_id:4d} / TP 変化 {changed_tp:4d} / "
               f"ARMED→WATCH {armed_to_watch:3d} / WATCH→ARMED {watch_to_armed:3d}{flag}")
 
@@ -266,7 +314,7 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
     armed = [k for k in keys
              if any(k in t and t[k]["res"].get("outcome") != "NOT_ARMED" for t in tables.values())]
     print(f"\n--- 4. setups (どれかの変種で ARMED): {len(armed)} ---")
-    base_r = [_r_of(tables["BASE"].get(k)) for k in armed]
+    base_r = [_r_of(tables[BASELINE].get(k)) for k in armed]
     for name, table in tables.items():
         vals = [_r_of(table.get(k)) for k in armed]
         fills = sum(1 for k in armed if (table.get(k) or {}).get("res", {}).get("outcome") == "FILLED")
@@ -282,17 +330,16 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
     # 5. 逐次(同時に 1 建玉だけ)。**結論はここで語る。**
     print("\n--- 5. 逐次(同時に 1 建玉だけ。経路占有を考慮した実運用の姿) ---")
     seq: Dict[str, List[Tuple]] = {}
+    totals: Dict[str, float] = {}
     for name, table in tables.items():
+        resting = _resting_keys(rows, name)
         items = sorted(table.values(), key=lambda it: it["setup"]["first"])
         busy_until = 0
         taken: List[Tuple] = []
         n = fills = tp1 = losses = 0
         total = 0.0
-        equity = 0.0
-        peak = 0.0
+        equity = peak = 0.0
         max_dd = 0.0
-        mfe: List[float] = []
-        mae: List[float] = []
         for item in items:
             setup, res = item["setup"], item["res"]
             if res.get("outcome") == "NOT_ARMED":
@@ -310,22 +357,44 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
                 equity += r
                 peak = max(peak, equity)
                 max_dd = min(max_dd, equity - peak)
-                for key, sink in (("mfeR", mfe), ("maeR", mae)):
-                    value = _finite(res.get(key))
-                    if value is not None:
-                        sink.append(value)
                 busy_until = int(res.get("exitT") or start) + 180
-                taken.append((start, setup["model"], setup["side"], r, bool(res.get("tp1"))))
+                taken.append((start, setup["model"], setup["side"], r, bool(res.get("tp1")),
+                              _entry_type(setup, resting)))
             elif res.get("outcome") == "NO_FILL":
                 busy_until = start + rest_min * 60
         seq[name] = taken
-        mfe_s = f"{statistics.median(mfe):+.2f}" if mfe else "n/a"
-        mae_s = f"{statistics.median(mae):+.2f}" if mae else "n/a"
-        print(f"{name:8s} 取った={n:3d} 約定={fills:3d} TP1到達={tp1:3d} 損切り={losses:3d} "
-              f"ΣR={total:+7.2f} 最大DD={max_dd:+6.2f}R MFE中央={mfe_s} MAE中央={mae_s}")
+        totals[name] = total
+        print(f"{name:9s} 取った={n:3d} 約定={fills:3d} TP1到達={tp1:3d} 損切り={losses:3d} "
+              f"ΣR={total:+7.2f} 最大DD={max_dd:+6.2f}R")
     print("  注: MFE/MAE は `entry_depth.simulate` が返さない(戻りは outcome/r/points/"
           "tp1/fillT/exitT/clearancePt)。**この再生では未取得**で、実トレードの MAE/MFE は "
-          "`python model_scorecard.py --excursions` 側にある。費用も含まれていない。")
+          "`python model_scorecard.py --excursions` 側にある。")
+    print("  費用: **含まれていない**。片道 1 枚の手数料は `.secrets/crosstrade.env` の "
+          "`FEE_PER_SIDE_<口座ID>`(R85)で、再生では枚数が決まらないので R では表せない。"
+          "MNQ 1 枚 = $2/pt なので、片道 $5 の口座なら 1 往復 $10 = SL 幅 20pt のトレードで "
+          "約 0.25R 相当。**下の差はこの分を引いていない。**")
+
+    # 5b. 効果の分離。B-A = TURTLE 復活、C-B = STDV の追加。
+    print("\n--- 5b. 効果の分離(逐次 ΣR) ---")
+    if "A_NOW" in totals and "B_TURTLE" in totals:
+        print(f"  TURTLE 復活の効果   B_TURTLE - A_NOW = {totals['B_TURTLE'] - totals['A_NOW']:+7.2f}R")
+    if "B_TURTLE" in totals and "C_STDV" in totals:
+        print(f"  STDV の追加効果     C_STDV   - B_TURTLE = {totals['C_STDV'] - totals['B_TURTLE']:+7.2f}R")
+    if "C_STDV" in totals and "C_RUNNER" in totals:
+        print(f"  runner 許可の追加   C_RUNNER - C_STDV = {totals['C_RUNNER'] - totals['C_STDV']:+7.2f}R")
+
+    # 5c. 型別(先回り指値型 / リテスト保持型 / その他モデル)
+    print("\n--- 5c. 型別の逐次内訳(先回り指値型 = MSS 確認後にレベルへ置く指値) ---")
+    for name, taken in seq.items():
+        by_type: Dict[str, List[float]] = collections.defaultdict(list)
+        for row in taken:
+            by_type[row[5]].append(row[3])
+        parts = []
+        for key in ("RESTING_LIMIT", "RETEST_HELD", "OTHER"):
+            vals = by_type.get(key) or []
+            if vals:
+                parts.append(f"{key} n={len(vals)} ΣR={sum(vals):+6.2f}")
+        print(f"{name:9s} " + (" | ".join(parts) if parts else "(約定なし)"))
 
     # 6. 学習に使っていない後続期間(時間で 70/30)
     print("\n--- 6. 期間分割(前 70% / 後 30%。規則選定に後半を使っていない) ---")
@@ -355,7 +424,7 @@ def report(rows: List[Dict[str, Any]], rest_min: int = 30, guard_n: float = 1.0,
     part = collections.Counter()
     thesis = collections.Counter()
     for row in rows:
-        for audit in (row["variants"].get("SHADOW") or {}).get("candidateStdv") or []:
+        for audit in (row["variants"].get(BASELINE) or {}).get("candidateStdv") or []:
             if not audit or audit.get("projectionValid") is not True:
                 continue
             part[audit.get("participation") or "NONE"] += 1

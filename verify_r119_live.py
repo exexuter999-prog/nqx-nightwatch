@@ -235,6 +235,37 @@ else:
         ok("ictStdv を上書きする環境変数は無い")
 
 
+# --------------------------------------------- 2c. modelGate(TURTLE 復活の反映)
+
+print("\n2c. modelGate — どのモデルが停止しているか")
+probe_gate = "\n".join((
+    "import json",
+    "import msnr_gate",
+    "r = msnr_gate.model_gate_rules()",
+    "print('@@' + json.dumps({'rules': [list(x) for x in r['rules']], 'invalid': r['invalid']}))",
+))
+proc = subprocess.run([sys.executable, "-c", probe_gate], cwd=BASE, env=child_env,
+                      capture_output=True, text=True)
+line = next((l for l in proc.stdout.splitlines() if l.startswith("@@")), None)
+if not line:
+    fail(f"modelGate の検査が失敗した: {proc.stderr.strip()[:300]}")
+else:
+    gate = json.loads(line[2:])
+    print(f"   停止中のモデル = {gate['rules'] or '(なし)'}")
+    if gate["invalid"]:
+        fail(f"modelGate に不正な行がある: {gate['invalid']}")
+    else:
+        ok("modelGate に不正な行が無い(不正な行は黙って無視されるので必ず見る)")
+    turtle = [r for r in gate["rules"] if r and r[0] == "TURTLE_SOUP_REVERSAL"]
+    if turtle:
+        print(f"   注意: TURTLE_SOUP_REVERSAL がまだ停止している {turtle} "
+              "(2026-09-19 のユーザー承認は復活)")
+    else:
+        ok("TURTLE_SOUP_REVERSAL の停止が解除されている(2026-09-19 ユーザー承認)")
+    if not gate["rules"]:
+        ok("他モデルの停止設定も無い(disabled は空)")
+
+
 # ------------------------- 3. 保存済みの入力で門が実際に効くか(通信なし)
 
 print("\n3. 保存済みの入力で門が効くか(ファイルだけ。取得も照会もしない)")
