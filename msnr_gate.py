@@ -3374,11 +3374,185 @@ def model_gate_blocker(candidate, rules):
     return None
 
 
-def build_candidates(bundle, result, bars, levels, ict, nf, strategy_matrix=None, model_gate=None):
+#: R119: 新規武装だけに掛かる 2 つの門(execution_contract.json の limitGate)。
+#: gapCap = 指値が現値から遠すぎる / targetPassed = 現値が既に TP1 を通過している。
+LIMIT_GATE_BLOCKERS = {"gapCap": "LIMIT_GAP_EXCEEDED", "targetPassed": "TARGET_ALREADY_PASSED"}
+LIMIT_GATE_MODES = ("OFF", "SHADOW", "LIVE")
+
+
+def limit_gate_policy(contract=None):
+    """``limitGate`` を ``{"gapCap": {...}, "targetPassed": {...}, "invalid": [...]}`` にする。
+
+    節が無い・読めない・形が壊れているときは全部 OFF(= R119 以前と同じ判定)。壊れた節は
+    その節だけ OFF にして ``invalid`` に残す(本番契約に不正な節が無いことはテストが見る)。
+    """
+    if contract is None:
+        try:
+            with open(CONTRACT_PATH, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            return {"gapCap": {"mode": "OFF"}, "targetPassed": {"mode": "OFF"},
+                    "invalid": ["CONTRACT_UNREADABLE"]}
+    raw = contract.get("limitGate") if isinstance(contract, dict) else None
+    out = {"gapCap": {"mode": "OFF"}, "targetPassed": {"mode": "OFF"}, "invalid": []}
+    if raw is None:
+        return out
+    if not isinstance(raw, dict):
+        out["invalid"].append("LIMIT_GATE_MALFORMED")
+        return out
+    gap = raw.get("gapCap")
+    if isinstance(gap, dict):
+        mode = str(gap.get("mode") or "OFF").strip().upper()
+        if mode not in LIMIT_GATE_MODES:
+            out["invalid"].append("LIMIT_GATE_GAP_CAP_MALFORMED")
+        elif mode == "OFF":
+            # OFF は 1 語で戻せるようにする。maxGapR / models は見ない。
+            out["gapCap"] = {"mode": "OFF"}
+        else:
+            try:
+                max_gap = float(gap.get("maxGapR", LIMIT_MAX_GAP_R))
+            except (TypeError, ValueError):
+                max_gap = None
+            models = gap.get("models")
+            models = [m for m in models if m in MODEL_ORDER] if isinstance(models, list) else None
+            if max_gap is None or max_gap <= 0 or not models:
+                out["invalid"].append("LIMIT_GATE_GAP_CAP_MALFORMED")
+            else:
+                out["gapCap"] = {"mode": mode, "maxGapR": max_gap, "models": models}
+    elif gap is not None:
+        out["invalid"].append("LIMIT_GATE_GAP_CAP_MALFORMED")
+    passed = raw.get("targetPassed")
+    if isinstance(passed, dict):
+        mode = str(passed.get("mode") or "OFF").strip().upper()
+        if mode not in LIMIT_GATE_MODES:
+            out["invalid"].append("LIMIT_GATE_TARGET_PASSED_MALFORMED")
+        else:
+            out["targetPassed"] = {"mode": mode}
+    elif passed is not None:
+        out["invalid"].append("LIMIT_GATE_TARGET_PASSED_MALFORMED")
+    return out
+
+
+def gate_price(bundle, max_age=None):
+    """R119 の門が使う**鮮度確認済みの**現値。``(price, reason)``。
+
+    ``price`` が取れないときは ``(None, 理由)`` で、呼び出し側は門を掛けない(相場データの
+    古さは pipeline が先に BLOCK する。ここで新しい停止経路を作らない)。``bars[-1]["c"]``
+    への落ち込みは**採らない** —— 確定足の終値は「今の値」ではないので、TP1 通過の判定に
+    使うと過去の足で新規を止めたり通したりする。
+    """
+    if not isinstance(bundle, dict):
+        return None, "NO_BUNDLE"
+    price = _num(bundle, "price")
+    if price is None or price <= 0:
+        return None, "NO_PRICE"
+    price_at = _epoch(bundle.get("priceAt"))
+    if price_at is None:
+        return None, "NO_PRICE_AT"
+    # 基準は bundle 自身の `at`(その周期の「今」)。無い周期だけ実時刻へ落ちる。
+    reference = _epoch(bundle.get("at"))
+    if reference is None:
+        reference = datetime.now(timezone.utc).timestamp()
+    if max_age is None:
+        try:
+            import execution_contract
+            max_age = float(execution_contract.CONTRACT["scenario"]["maxAgeSec"])
+        except Exception:  # noqa: BLE001 - 契約が読めないときは §6.2 の既定窓で判定する
+            max_age = 600.0
+    age = reference - price_at
+    if abs(age) > float(max_age):
+        return None, f"PRICE_STALE_{age:.0f}S"
+    return price, None
+
+
+def limit_entry_side(candidate, price):
+    """発注時に **LIMIT になるか**(建値が現値の先にあるか)。
+
+    ``autotrade_engine._entry_order_type`` と同じ式にする。あちらは建値が現値を通過して
+    いれば MARKET を出すので、指値専用の向き判定をそのまま全候補へ当てると、成行になる
+    はずの候補を「指値として成立しない」と誤って落とす。
+    """
+    try:
+        entry = float(candidate["entry"])
+        last = float(price)
+    except (TypeError, ValueError, KeyError):
+        return False
+    side = str(candidate.get("side") or "").upper()
+    if side == "BUY":
+        return entry < last
+    if side == "SELL":
+        return entry > last
+    return False
+
+
+def limit_gate_audit(candidate, price, price_reason=None, policy=None):
+    """R119 の 2 門の観測。``{"blocker", "gapR", "tp1R", "orderType", ...}`` を必ず返す。
+
+    ``blocker`` は LIVE で当たった門のブロッカー名だけ。SHADOW は観測を残して None を返す。
+    採点・等級・建値・SL・targets には一切触れないので ``decisionId`` は変わらない。
+    """
+    policy = limit_gate_policy() if policy is None else policy
+    gap_rule = (policy or {}).get("gapCap") or {"mode": "OFF"}
+    passed_rule = (policy or {}).get("targetPassed") or {"mode": "OFF"}
+    audit = {"gapCapMode": str(gap_rule.get("mode") or "OFF"),
+             "targetPassedMode": str(passed_rule.get("mode") or "OFF"),
+             "blocker": None, "gapR": None, "tp1R": None, "orderType": None, "reason": None}
+    if audit["gapCapMode"] == "OFF" and audit["targetPassedMode"] == "OFF":
+        audit["reason"] = "GATE_OFF"
+        return audit
+    if price is None:
+        # 鮮度が確認できない周期は掛けない。理由を残して「評価した上で効かなかった」と
+        # 「入力が無くて判定していない」を区別できるようにする(CLAUDE.md §2 と同じ規律)。
+        audit["reason"] = price_reason or "PRICE_UNVERIFIED"
+        return audit
+    try:
+        entry = float(candidate["entry"])
+        stop = float(candidate["stop"])
+        tp1 = float((candidate.get("targets") or [None])[0])
+    except (TypeError, ValueError, KeyError, IndexError):
+        audit["reason"] = "GEOMETRY_INCOMPLETE"
+        return audit
+    risk = abs(entry - stop)
+    if risk <= 0:
+        audit["reason"] = "GEOMETRY_INCOMPLETE"
+        return audit
+    side = str(candidate.get("side") or "").upper()
+    if side not in {"BUY", "SELL"}:
+        audit["reason"] = "SIDE_UNKNOWN"
+        return audit
+    is_limit = limit_entry_side(candidate, price)
+    audit["orderType"] = "LIMIT" if is_limit else "MARKET"
+    audit["gapR"] = round(abs(price - entry) / risk, 3)
+    sign = 1.0 if side == "BUY" else -1.0
+    audit["tp1R"] = round(sign * (tp1 - price) / risk, 3)
+    blockers = []
+    # 門 2(targetPassed): 現値が既に TP1 に到達/通過。指値でも成行でも払えない幾何なので
+    # 注文種別で分けない。向きは区別する(BUY は上、SELL は下が「通過」)。
+    if audit["targetPassedMode"] != "OFF" and audit["tp1R"] <= 0:
+        audit.setdefault("observed", []).append(LIMIT_GATE_BLOCKERS["targetPassed"])
+        if audit["targetPassedMode"] == "LIVE":
+            blockers.append(LIMIT_GATE_BLOCKERS["targetPassed"])
+    # 門 1(gapCap): **LIMIT になる候補だけ**。成行になる候補は待ちが発生しないので無関係。
+    if audit["gapCapMode"] != "OFF" and is_limit:
+        models = gap_rule.get("models") or ()
+        if candidate.get("model") in models and audit["gapR"] > float(gap_rule["maxGapR"]):
+            audit["maxGapR"] = float(gap_rule["maxGapR"])
+            audit.setdefault("observed", []).append(LIMIT_GATE_BLOCKERS["gapCap"])
+            if audit["gapCapMode"] == "LIVE":
+                blockers.append(LIMIT_GATE_BLOCKERS["gapCap"])
+    audit["blocker"] = blockers[0] if blockers else None
+    audit["blockers"] = blockers
+    return audit
+
+
+def build_candidates(bundle, result, bars, levels, ict, nf, strategy_matrix=None, model_gate=None,
+                     limit_gate=None):
     # 指値の向き(建値が現値の先にあるか)を判定するための現値。
     last_price = (bundle or {}).get("price")
     if last_price is None and bars:
         last_price = bars[-1].get("c")
+    # R119 の 2 門は**鮮度確認済みの**現値だけで判定する(確定足の終値へは落ちない)。
+    gate_last, gate_reason = gate_price(bundle)
     route = route_regime(bundle, result)
     candidates = []
     # ICTBACK の1m候補は、既存の3m MSNR連鎖を置換しない。欠損時に3mを
@@ -3470,17 +3644,27 @@ def build_candidates(bundle, result, bars, levels, ict, nf, strategy_matrix=None
     # R89: 契約で外したモデル/型は重複除去の**前**に分ける。外した候補が同じ side の
     # 生きている候補(例: 指値型に負けたリテスト保持型)を押し出さないため。
     rules = model_gate_rules()["rules"] if model_gate is None else model_gate
+    # R119: 指値の遠さと「現値が既に TP1 を通過」も同じ層で分ける。**新規武装だけ**に掛かり、
+    # 凍結プランの管理(MODIFY / FLATTEN / 追撃)はこの関数を通らないので影響しない。
+    gate_policy = limit_gate_policy() if limit_gate is None else limit_gate
     # side/modelごとの重複は最高scoreだけを残す。
     unique, gated = {}, {}
     for candidate in candidates:
-        blocker = model_gate_blocker(candidate, rules)
-        if blocker:
+        model_blocker = model_gate_blocker(candidate, rules)
+        if model_blocker:
+            candidate["modelGate"] = model_blocker
+        gate = limit_gate_audit(candidate, gate_last, gate_reason, gate_policy)
+        candidate["limitGate"] = gate
+        for tag in (gate.get("observed") or ()):
+            # SHADOW も LIVE も観測は証跡へ(記録専用。採点・等級には触れない)。
+            candidate["evidence"] = list(dict.fromkeys([*(candidate.get("evidence") or []), tag]))
+        blockers = [x for x in (model_blocker, *(gate.get("blockers") or ())) if x]
+        if blockers:
             # 記録には残す(WATCH + ブロッカー)。primary の選択肢には入れない。
-            candidate["modelGate"] = blocker
-            candidate["hardBlockers"] = list(dict.fromkeys([*(candidate.get("hardBlockers") or []), blocker]))
+            candidate["hardBlockers"] = list(dict.fromkeys([*(candidate.get("hardBlockers") or []), *blockers]))
             candidate["allowed"] = False
             candidate["state"] = "WATCH"
-        bucket = gated if blocker else unique
+        bucket = gated if blockers else unique
         key = (candidate.get("model"), candidate.get("side"))
         current = bucket.get(key)
         candidate_r = (candidate.get("targetR") or [0])[0]

@@ -238,6 +238,24 @@
       }
     ]
   },
+  "limitGate": {
+    "_note": "R119(2026-09-19, docs/R119_LIMIT_GATE.md): **新規武装だけ**に掛かる 2 つの門。保有建玉の管理(凍結プランの MODIFY / FLATTEN / 追撃)はこの節を一切読まない。gapCap: 発注時に LIMIT になる候補(建値が現値の先)について |現値-建値|/リスク幅 = gapR が maxGapR を超えたら primary に選ばない。MARKET になる候補(建値が現値を通過している)には掛けない —— 指値専用の向き判定で成行候補を落とさないため、判定は autotrade_engine._entry_order_type と同じ式を使う。targetPassed: 現値が既に TP1 に到達/通過している候補を新規武装しない(BUY は 現値 >= tp1、SELL は 現値 <= tp1。向きを区別する)。どちらも鮮度確認済みの現値(bundle.price と priceAt が scenario.maxAgeSec 以内)でだけ判定し、確認できない周期は掛けずに理由を limitGate.reason に残す(相場データの古さは pipeline が先に BLOCK する)。mode: OFF / SHADOW=記録のみ / LIVE=primary から外す(hardBlockers に LIMIT_GAP_EXCEEDED / TARGET_ALREADY_PASSED を付けて WATCH。別モデルが primary になれる)。SL も建値も書き換えないので decisionId は変わらない。書き換えたら python tests/test_r119_limit_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R119-LIMIT-GATE-1",
+    "_decisionNote": "2026-09-19 ユーザー決定: gapCap は既存の msnr_gate.LIMIT_MAX_GAP_R と同じ 1.5 で LIVE、targetPassed も LIVE。1.0 への引き締め・一律成行化・BREAKER 全停止は保留。根拠と実測(標本 40 指値・BREAKER 19 シグナル)は docs/R119_LIMIT_GATE.md。戻すのは各節の mode を OFF にする 1 語。",
+    "gapCap": {
+      "mode": "LIVE",
+      "maxGapR": 1.5,
+      "models": [
+        "VP80_REVERSION",
+        "TURTLE_SOUP_REVERSAL",
+        "BREAKER_CONTINUATION",
+        "OTE_FVG_PULLBACK"
+      ]
+    },
+    "targetPassed": {
+      "mode": "LIVE"
+    }
+  },
   "fillWatch": {
     "_note": "R91(2026-09-15, docs/R91_FILL_WATCH_REALTIME.md): 約定監視 fill_watch.py の常駐と照会間隔。CrossTrade の Tradovate 口座は REST のみ(WebSocket は NinjaTrader 8 口座だけ、約定のプッシュ通知も無い)なので、上限(利用者ごと毎秒 3 回・溜め 20 回、REST と WebSocket で共有、超過は 429)の中で照会を詰める。autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっていれば切り離したプロセスとして起動し直す(単一インスタンス、出力は .secrets/fill_watch.log)。fastIntervalSec = 建玉がある間の間隔 / idleIntervalSec = FLAT の間隔 / maxRequestsPerSec = fill_watch 自身の上限(ループの照会と送信後照会の分を残す。FLAT の照会は裏取りで 2 本) / rateLimitBackoffSec = 429 を見たら空ける秒数。ループの reconcile 中は照会しない。",
     "version": "R91-FILL-WATCH-1",

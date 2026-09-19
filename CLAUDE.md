@@ -107,6 +107,21 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   逐次再生で改善せず(BREAKER を RISK_CAP_EXCEEDED の WATCH に変えるだけ)、ユーザー判断まで OFF。
   SL が変わる節は FLAT・primary なしのときに切り替える。検証は `python stop_logic.py --policy` /
   `python replay_stop_logic.py`(読むだけ)/ `python tests/test_r90_stop_logic.py`。
+- **指値の門(R119, 2026-09-19 ユーザー決定)**: 設定は `execution_contract.json` の `limitGate`、根拠は
+  `docs/R119_LIMIT_GATE.md`。**新規武装だけ**に掛かる 2 門で、保有建玉の管理(MODIFY / FLATTEN /
+  追撃)は読まない。(1) `gapCap`(**LIVE / maxGapR 1.5**): 発注時に LIMIT になる候補で
+  `gapR = |現値-建値| / リスク幅` が 1.5 を超えたら primary に選ばない(`LIMIT_GAP_EXCEEDED` で
+  WATCH)。**MARKET になる候補には掛けない** —— 注文種別の判定は `autotrade_engine._entry_order_type`
+  と同じ式(`msnr_gate.limit_entry_side`)で、指値専用の向き判定で成行候補を落とさない。
+  従来 `_resting_limit_ok` は TURTLE の掃引と Silver Bullet にしか掛かっておらず、BREAKER の
+  完成チェーンだけ距離無制限の指値が通っていた。(2) `targetPassed`(**LIVE**): 現値が既に TP1 に
+  到達/通過した候補を武装しない(BUY は 現値 ≥ tp1、SELL は 現値 ≤ tp1。向きを区別)。
+  `TARGET_HEADROOM_INSUFFICIENT` は R を**建値から**測るので現値がどこにあっても健全に見える。
+  どちらも**鮮度確認済みの現値**(`msnr_gate.gate_price`: `priceAt` が `scenario.maxAgeSec` 以内)
+  でだけ判定し、確定足の終値へは落ちない。SL も建値も変えないので `decisionId` は変わらない。
+  1.0 への引き締め・一律成行化・BREAKER 全停止は**保留**(2026-09-19)。検証は
+  `python tests/test_r119_limit_gate.py` / `python replay_limit_gate.py --ledger --replay`(読むだけ)。
+  切り替えは FLAT かつ未約定注文なしのときに、戻しは各節の `mode` を `OFF` にする 1 語。
 - **SL 狩り対策(R103, 2026-09-16)**: 設定は `execution_contract.json` の `stopLogic` の 3 節、根拠は
   `docs/reports/STOP_HUNT_EVIDENCE_2026-09-15.md` と `docs/R103_1_LIQUIDITY_POOL_STOP.md` /
   `docs/R103_3_SWEEP_GATE.md`。(1) `poolClearance`: 元の SL の外側 1N 以内に未回収の流動性プール
@@ -468,6 +483,17 @@ CVD状態、dry-run handoff）と `.secrets/monitor_pipeline_bundle.json`（検�
   (`ENTRY_STALE_CANCEL`)を記録し、**同じサイクル**で startup recovery(不在証明 → RECOVER →
   `ENTRY_RECOVERED`)まで進めて HALT と claim を解く。取消の確認が取れなければ HALT。
   停止は `NQX_STALE_ENTRY_CANCEL=0`。回復済みプランの後に残る注文は別物として触らない。
+  **記録(R120, 2026-09-19)**: 2026-09-19 01:50 の 7 口座指値は、02:45 に価格が TP1 へ届いた
+  のに `ENTRY_STALE_CANCEL` が発火せず 115 分残った(最後はブローカー側の CANCELED を観測)。
+  **この件は利用者申告により運用事由(当該ループのセッションを別作業に使用)としてクローズ。**
+  **技術的な原因は確定していない** —— 当該 9 周期が `_stale_entry_to_cancel` まで到達したかが
+  未確認なので、身元検査で落ちたとは書かない。関数の性質としては、身元検査は
+  `parents ⊆ ours` で `ours` は凍結 `routeSnapshot` の ACCEPTED 親脚だけ(`bracketOrderIds` を
+  含まない)。`parentId` を持たない子注文が `activeOrders` に混ざると落ちるが、それは手動注文が
+  混ざった状態と区別できないので **ガードを緩めない**。再発時は (1) 到達確認 → (2)
+  `broker_status.py --account <口座> --json` の `activeOrders` の順で、先に
+  `_stale_entry_to_cancel` の見送り理由を台帳へ 1 行残す。経緯と再現試験は
+  `docs/R120_STALE_ENTRY_OWNERSHIP.md` と `python tests/test_r120_stale_entry_ownership.py`。
 
 ### 6.5 建玉がOPENのサイクル
 

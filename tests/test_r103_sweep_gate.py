@@ -81,6 +81,11 @@ def bundle_for(case, at_iso=None, price=None):
 
 
 REAL_POLICY = msnr_gate.stop_logic_policy
+# R119: この試験は sweepGate だけを見る。指値の門(limitGate)は stopLogic と同じように
+# 切り離す —— T4(09-15 22:31、建値 29,426 / 現値 29,388.75 = gapR 2.01)は gapCap 1.5 に
+# 当たるので、切り離さないとこのファイルの ARMED 前提が門の設定で揺れる。
+REAL_LIMIT_GATE = msnr_gate.limit_gate_policy
+LIMIT_GATE_OFF = {"gapCap": {"mode": "OFF"}, "targetPassed": {"mode": "OFF"}, "invalid": []}
 
 
 def evaluate(bundle, sweep_mode, pool_mode="OFF", **sweep_overrides):
@@ -89,10 +94,12 @@ def evaluate(bundle, sweep_mode, pool_mode="OFF", **sweep_overrides):
     pol["poolClearance"] = dict(stop_logic.DEFAULT_POOL, mode=pool_mode)
     pol["sweepGate"] = dict(stop_logic.DEFAULT_SWEEP, mode=sweep_mode, **sweep_overrides)
     msnr_gate.stop_logic_policy = (lambda: pol)
+    msnr_gate.limit_gate_policy = (lambda contract=None: dict(LIMIT_GATE_OFF))
     try:
         return msnr_gate.evaluate(copy.deepcopy(bundle))
     finally:
         msnr_gate.stop_logic_policy = REAL_POLICY
+        msnr_gate.limit_gate_policy = REAL_LIMIT_GATE
 
 
 def cand(result, model, side):
