@@ -30,6 +30,9 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 WEB_APP_URL = os.environ.get("TELEGRAM_WEB_APP_URL", "https://nqx-nightwatch.pages.dev/")
 STATE_FILE = os.path.join(BASE, ".secrets", "monitor_last_sent.json")
 LEGACY_STATE_FILE = os.path.join(BASE, ".secrets", "last_monitor_bundle.json")
+# R122: 構造文脈の記憶(初出 / 否定 / 消化)。**発注台帳とは別ファイル**で、
+# 読めなくても周期は止めない(記憶なし = 毎周期その場の観測だけで判断する)。
+STRUCTURE_STATE_FILE = os.path.join(BASE, ".secrets", "structure_context_state.json")
 
 # シナリオの有効期間。監視ループは 3 分間隔なので、3 サイクル分を上限にする。
 # 監視が止まればサーバー時刻だけでシナリオが消える。
@@ -443,10 +446,19 @@ def compact(bundle):
     # `context.gap` も 0 件だった。HTF 生足は market payload
     # (`build_market_payload`)にも凍結プレビュー(`_frozen_preview_url`)にも
     # 載らないため、残しても送信サイズは変わらない。
-    for secondary in ("bars15m", "bars45m", "bars1h", "bars4h"):
+    #
+    # R122(2026-09-19): ``bars15m`` も同じ理由で**残す**。R122 の親の仮説は
+    # 「直接取得した確定 15 分足の構造」を第一の出所にしており、compact が落とすと
+    # 評価器へ一度も届かない(実測: 監査 1,359 本すべてで `BARS15M_MISSING`、親は
+    # 常に粗い HTF 要約へ落ちていた)。bars1d と同様、market payload にも凍結
+    # プレビューにも載らないので送信サイズは変わらない。60 本 × 5 数値。
+    for secondary in ("bars45m", "bars1h", "bars4h"):
         rows = snapshot.pop(secondary, None)
         if isinstance(rows, list):
             snapshot[secondary + "Count"] = len(rows)
+    bars15m = snapshot.get("bars15m")
+    if isinstance(bars15m, list):
+        snapshot["bars15mCount"] = len(bars15m)
     bars1d = snapshot.get("bars1d")
     if isinstance(bars1d, list):
         snapshot["bars1dCount"] = len(bars1d)
@@ -566,6 +578,32 @@ def _apply_entry_depth(out, scenario, result):
         return scenario, f"R86 entry depth unavailable (not applied): {type(exc).__name__}: {exc}"
 
 
+def _structure_memory_load(path=STRUCTURE_STATE_FILE):
+    """R122 の記憶を読む。無い・壊れている・読めないは「記憶なし」。"""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _structure_memory_save(context, state, path=STRUCTURE_STATE_FILE):
+    """観測を取り込んで書き戻す。**失敗しても周期を止めない**(注記だけ返す)。"""
+    try:
+        import market_structure_context
+        memory = market_structure_context.Memory(state)
+        payload = memory.observe(context)
+        target = path + ".tmp"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=1)
+        os.replace(target, path)
+        return None
+    except Exception as exc:  # noqa: BLE001 - 記憶の失敗で publish を止めない
+        return f"R122 structure memory not persisted: {type(exc).__name__}: {exc}"
+
+
 def enrich_decisive_strategy(bundle):
     """R11-D: monitor bundleから評価カードとprimary scenarioを生成する。
 
@@ -577,8 +615,29 @@ def enrich_decisive_strategy(bundle):
         return bundle, ["R11-D disabled by NQX_DECISIVE_STRATEGY"]
     out = dict(bundle)
     strategy_notes = []
+    # R122: 構造文脈の記憶は evaluate の**入力**として渡し、評価後に取り除く
+    # (msnr_gate.evaluate は純粋関数のままで、ファイルには触れない)。
+    structure_state = _structure_memory_load()
+    if isinstance(structure_state, dict):
+        try:
+            import market_structure_context
+            out["_structureMemory"] = market_structure_context.Memory(structure_state).snapshot()
+        except Exception:  # noqa: BLE001 - 記憶が読めなくても評価は続ける
+            out.pop("_structureMemory", None)
     try:
         result = msnr_gate.evaluate(out)
+        out.pop("_structureMemory", None)
+        structure_context = result.get("structureContext")
+        if structure_context is not None:
+            note = _structure_memory_save(structure_context, structure_state)
+            if note:
+                strategy_notes.append(note)
+            try:
+                import market_structure_context
+                # 監査コピー用の縮約。発注経路は decision.structure を読む。
+                out["structureContext"] = market_structure_context.compact(structure_context)
+            except Exception:  # noqa: BLE001
+                pass
         decision = result.get("decision") or {}
         data_gate = acquisition_display_gate(out.get("acquisitionReceipt"))
         # A raw-data receipt is mandatory for an actionable decision.  Keep
@@ -665,6 +724,7 @@ def enrich_decisive_strategy(bundle):
             notes.append("CVD unavailable after retry (A+ capped to A)")
         return out, notes
     except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+        out.pop("_structureMemory", None)
         return out, [f"R11-D evaluation unavailable: {type(exc).__name__}: {exc}"]
 
 

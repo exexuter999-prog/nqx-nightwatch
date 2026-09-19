@@ -3512,6 +3512,10 @@ def ict_stdv_policy(contract=None):
         pmode = str(participation.get("mode") or "OFF").strip().upper()
         if pmode not in ICT_STDV_MODES:
             out["invalid"].append("ICT_STDV_PARTICIPATION_MALFORMED")
+        elif pmode != "OFF":
+            # R122: 参加判断の正式な入口は `structureContext.participation` 1 か所。
+            # 二重判定を作らないため、この節は OFF 固定にして理由を残す(§6)。
+            out["invalid"].append("ICT_STDV_PARTICIPATION_SUPERSEDED_BY_R122")
         else:
             out["participation"] = {"mode": pmode}
     elif participation is not None:
@@ -3745,8 +3749,140 @@ def limit_gate_audit(candidate, price, price_reason=None, policy=None):
     return audit
 
 
+#: R122: 多層構造文脈と参加判断(execution_contract.json の structureContext)。段は 5 つとも独立。
+STRUCTURE_CONTEXT_MODES = ("OFF", "SHADOW", "LIVE")
+STRUCTURE_CONTEXT_STAGES = ("context", "participation", "shallowCandidate", "selection", "nearTerm")
+#: 未校正の短期予測を武装ゲートにしない(§3)。この段だけ LIVE を受け付けない。
+STRUCTURE_CONTEXT_NO_LIVE = ("nearTerm",)
+
+
+def structure_context_policy(contract=None):
+    """``structureContext`` を段ごとの ``{"mode": ...}`` にする。
+
+    節が無い・読めない・形が壊れているときは全段 OFF(= R122 以前と同じ判定)。壊れた段は
+    その段だけ OFF にして ``invalid`` に残す(本番契約に不正な段が無いことは試験が見る)。
+    ``nearTerm`` に LIVE を書いた契約は**その段だけ OFF** にして ``invalid`` へ落とす。
+    """
+    off = {stage: {"mode": "OFF"} for stage in STRUCTURE_CONTEXT_STAGES}
+    off.update({"params": {}, "invalid": []})
+    if contract is None:
+        try:
+            with open(CONTRACT_PATH, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            return {**off, "invalid": ["CONTRACT_UNREADABLE"]}
+    raw = contract.get("structureContext") if isinstance(contract, dict) else None
+    if raw is None:
+        return off
+    if not isinstance(raw, dict):
+        return {**off, "invalid": ["STRUCTURE_CONTEXT_MALFORMED"]}
+    out = {stage: {"mode": "OFF"} for stage in STRUCTURE_CONTEXT_STAGES}
+    out.update({"params": {}, "invalid": []})
+    for stage in STRUCTURE_CONTEXT_STAGES:
+        node = raw.get(stage)
+        if node is None:
+            continue
+        if not isinstance(node, dict):
+            out["invalid"].append(f"STRUCTURE_CONTEXT_{stage.upper()}_MALFORMED")
+            continue
+        mode = str(node.get("mode") or "OFF").strip().upper()
+        if mode not in STRUCTURE_CONTEXT_MODES:
+            out["invalid"].append(f"STRUCTURE_CONTEXT_{stage.upper()}_MALFORMED")
+            continue
+        if mode == "LIVE" and stage in STRUCTURE_CONTEXT_NO_LIVE:
+            out["invalid"].append(f"STRUCTURE_CONTEXT_{stage.upper()}_LIVE_FORBIDDEN")
+            continue
+        out[stage]["mode"] = mode
+    params = raw.get("params")
+    out["params"] = dict(params) if isinstance(params, dict) else {}
+    # 下流の段は context を入力にする。context が OFF なら仮説そのものが無いので、
+    # participation / shallowCandidate / nearTerm は自動的に効かない(理由を残す)。
+    if out["context"]["mode"] == "OFF":
+        for stage in ("participation", "shallowCandidate", "nearTerm"):
+            if out[stage]["mode"] != "OFF":
+                out[stage] = {"mode": "OFF", "reason": "CONTEXT_OFF"}
+    return out
+
+
+def structure_context_active(policy):
+    """どれか 1 段でも動いているか(OFF 全段なら文脈そのものを作らない)。"""
+    return any(str((policy or {}).get(stage, {}).get("mode") or "OFF") != "OFF"
+               for stage in STRUCTURE_CONTEXT_STAGES)
+
+
+def _structure_context_for(bundle, result, bars, ict, nf, tol, policy):
+    """R122 の文脈を 1 周期ぶん作る。失敗しても周期を止めない(理由だけ残す)。"""
+    if not structure_context_active(policy):
+        return None
+    try:
+        import market_structure_context
+        memory = bundle.get("_structureMemory") if isinstance(bundle, dict) else None
+        return market_structure_context.build(
+            bundle, result, bars, ict, nf, tol,
+            memory=memory if isinstance(memory, dict) else None)
+    except Exception as exc:  # noqa: BLE001 - 文脈の失敗で判定を止めない
+        return {"schemaVersion": "NQX_STRUCTURE_CONTEXT/1", "status": "CONTEXT_UNAVAILABLE",
+                "reasons": [f"BUILD_FAILED:{type(exc).__name__}"], "thesis": None,
+                "child": None, "childRelation": "UNRESOLVED", "nearTerm": {}}
+
+
+def participation_policy_blocker_shadow():
+    try:
+        import participation_policy
+        return participation_policy.BLOCKER_SHALLOW_SHADOW
+    except Exception:  # noqa: BLE001
+        return "SHALLOW_CANDIDATE_SHADOW"
+
+
+def _shallow_candidate(context, bundle, result, bars, levels, ict, regime_info, nf,
+                       strategy_matrix, candidates, price, mode):
+    """R122 §4.2: 浅い構造の代替候補。証拠が無ければ None(= 代替参加なし)。"""
+    try:
+        import participation_policy
+    except Exception:  # noqa: BLE001
+        return None
+    thesis = (context or {}).get("thesis") or {}
+    side = thesis.get("bias")
+    orderable = any(c.get("allowed") and c.get("side") == side and not c.get("modelGate")
+                    for c in candidates)
+    seed = participation_policy.shallow_seed(
+        context, ict, bars, price, nf, model_stop_buffer(nf), orderable)
+    if not seed:
+        return None
+    level = {"label": seed["levelLabel"], "price": _tick_price(seed["levelPrice"]),
+             "tier": 3, "mergedWith": [], "confluence": 1, "freshness": "FRESH"}
+    child = ((context or {}).get("children") or {}).get(side) or {}
+    # 子の確認済み構造をそのまま連鎖として渡す(candidate_vp80 と同じ作法)。
+    chain = {"type": child.get("type") or "FLIP", "side": seed["side"],
+             "state": child.get("state") or "FLIP_ACCEPTED",
+             "breakBarT": child.get("originBarT"), "sweepBarT": child.get("originBarT"),
+             "originBarT": child.get("originBarT"),
+             "dispBody": max((abs(b["c"] - b["o"]) for b in bars[-3:]), default=0),
+             "barsLeft": child.get("barsLeft"), "blockers": []}
+    candidate = _candidate_for_chain("BREAKER_CONTINUATION", level, chain, bars, levels, ict,
+                                     regime_info, bundle, nf, strategy_matrix,
+                                     entry=_tick_price(seed["entry"]),
+                                     stop=_tick_price(seed["stop"]))
+    if not candidate:
+        return None
+    candidate["r122Shallow"] = True
+    candidate["entryOrderType"] = "LIMIT"
+    candidate["fvg"] = seed["fvg"]
+    candidate["shallowSeed"] = {k: seed[k] for k in
+                                ("distancePt", "thesisId", "childId", "reason")}
+    # **深い押し目候補の加点(OTE_FVG_CONFLUENCE)は付けない。** 同じ証拠で二重加点しない。
+    candidate["evidence"] = list(dict.fromkeys([*(candidate.get("evidence") or []),
+                                                *seed["evidence"]]))
+    if str(mode).upper() != "LIVE":
+        # SHADOW: 記録は残すが primary にはしない(注文意図を変えない)。
+        candidate["hardBlockers"] = list(dict.fromkeys(
+            [*(candidate.get("hardBlockers") or []),
+             participation_policy.BLOCKER_SHALLOW_SHADOW]))
+    return _finalize_candidate(candidate, ict)
+
+
 def build_candidates(bundle, result, bars, levels, ict, nf, strategy_matrix=None, model_gate=None,
-                     limit_gate=None):
+                     limit_gate=None, context=None, structure_policy=None):
     # 指値の向き(建値が現値の先にあるか)を判定するための現値。
     last_price = (bundle or {}).get("price")
     if last_price is None and bars:
@@ -3847,9 +3983,8 @@ def build_candidates(bundle, result, bars, levels, ict, nf, strategy_matrix=None
     # R119: 指値の遠さと「現値が既に TP1 を通過」も同じ層で分ける。**新規武装だけ**に掛かり、
     # 凍結プランの管理(MODIFY / FLATTEN / 追撃)はこの関数を通らないので影響しない。
     gate_policy = limit_gate_policy() if limit_gate is None else limit_gate
-    # side/modelごとの重複は最高scoreだけを残す。
-    unique, gated = {}, {}
-    for candidate in candidates:
+
+    def apply_contract_gates(candidate):
         model_blocker = model_gate_blocker(candidate, rules)
         if model_blocker:
             candidate["modelGate"] = model_blocker
@@ -3864,8 +3999,66 @@ def build_candidates(bundle, result, bars, levels, ict, nf, strategy_matrix=None
             candidate["hardBlockers"] = list(dict.fromkeys([*(candidate.get("hardBlockers") or []), *blockers]))
             candidate["allowed"] = False
             candidate["state"] = "WATCH"
+        return blockers
+
+    blocked_by_contract = {}
+    for candidate in candidates:
+        blocked_by_contract[id(candidate)] = apply_contract_gates(candidate)
+
+    # R122: 既存候補のゲートが確定してから、浅い構造の代替候補を作る。「同じ方向に
+    # 発注できる候補が既にある」判定は**ゲート後**でなければ意味がない。
+    # 文脈が無い周期(= 全段 OFF)では契約を読みに行かない。R122 以前と I/O も同じ。
+    policy = structure_policy
+    if policy is None and context is not None:
+        policy = structure_context_policy()
+    shallow_mode = str(((policy or {}).get("shallowCandidate") or {}).get("mode") or "OFF")
+    if shallow_mode != "OFF" and isinstance(context, dict) and context.get("status") == "OK":
+        shallow = _shallow_candidate(context, bundle, result, bars, levels, ict, route, nf,
+                                     strategy_matrix, candidates, gate_last, shallow_mode)
+        if shallow:
+            blocked_by_contract[id(shallow)] = apply_contract_gates(shallow)
+            # 記録は必ず残す。**primary の選択肢に入れるのは LIVE で実際に武装できるときだけ。**
+            # `select_primary` は等級と点数だけで並べるので、WATCH の追加候補をそのまま
+            # 入れると「発注しないのに表示上の primary が変わる」= SHADOW が注文意図を
+            # 変えたように見える(実測で 1 周期)。modelGate と同じ除外印を使う。
+            if shallow_mode != "LIVE" or not shallow.get("allowed"):
+                shallow["modelGate"] = shallow.get("modelGate") or (
+                    participation_policy_blocker_shadow() if shallow_mode != "LIVE"
+                    else "SHALLOW_CANDIDATE_NOT_ORDERABLE")
+            candidates.append(shallow)
+
+    # R122: 参加判断は**全候補**に付ける(記録は常に、ブロックは LIVE のときだけ)。
+    part_mode = str(((policy or {}).get("participation") or {}).get("mode") or "OFF")
+    if part_mode != "OFF" and isinstance(context, dict):
+        try:
+            import participation_policy
+            for candidate in candidates:
+                audit = participation_policy.evaluate(candidate, context, gate_last)
+                candidate["participation"] = audit
+                blockers = list(audit.get("blockers") or ())
+                if part_mode == "LIVE" and blockers:
+                    candidate["hardBlockers"] = list(dict.fromkeys(
+                        [*(candidate.get("hardBlockers") or []), *blockers]))
+                    candidate["allowed"] = False
+                    candidate["state"] = "WATCH"
+                    candidate["participationBlocked"] = blockers
+                elif blockers:
+                    # SHADOW: 観測だけ。注文意図を変えない。
+                    candidate["evidence"] = list(dict.fromkeys(
+                        [*(candidate.get("evidence") or []), "R122_PARENT_INVALIDATED_SHADOW"]))
+        except Exception:  # noqa: BLE001 - 参加判断の失敗で候補を落とさない
+            pass
+
+    # side/modelごとの重複は最高scoreだけを残す。
+    unique, gated = {}, {}
+    for candidate in candidates:
+        blockers = blocked_by_contract.get(id(candidate)) or []
+        blockers = list(blockers) + list(candidate.get("participationBlocked") or ())
         bucket = gated if blockers else unique
-        key = (candidate.get("model"), candidate.get("side"))
+        # R122: 代替候補は既存候補と**別の枠**で数える。同じ (model, side) の枠へ入れると、
+        # 点数が高いだけの代替候補が本物の候補を重複除去で消してしまい、SHADOW でも
+        # 表示上の primary が変わる(実測 3 周期)。
+        key = (candidate.get("model"), candidate.get("side"), bool(candidate.get("r122Shallow")))
         current = bucket.get(key)
         candidate_r = (candidate.get("targetR") or [0])[0]
         current_r = (current.get("targetR") or [0])[0] if current else 0
@@ -3894,18 +4087,33 @@ def setup_identity(candidate):
     return hashlib.sha1(material.encode()).hexdigest()[:12]
 
 
-def select_primary(candidates, bundle=None):
-    """A/A+を最優先し、同点でも必ず1件へ決める。"""
+def select_primary(candidates, bundle=None, context=None, structure_policy=None):
+    """A/A+を最優先し、同点でも必ず1件へ決める。
+
+    R122: ``structure_policy["selection"]["mode"] == "LIVE"`` のときだけ、並べ替えの**後**に
+    「武装できる候補(``allowed``)を優先する」を足す。既定は OFF で、選び方は R122 以前と
+    バイト一致する(監査 1,359 本で 15 周期だけ選択が変わる)。SHADOW は記録のみ。
+    """
     candidates = list(candidates or [])
     rank = {"A+": 3, "A": 2, "B": 1}
     candidates.sort(key=lambda c: (rank.get(c.get("grade"), 0), c.get("score", -999),
                                    c.get("targetR", [0])[0] if c.get("targetR") else 0,
                                    MODEL_RANK.get(c.get("model"), 0)), reverse=True)
+    selection_mode = str(((structure_policy or {}).get("selection") or {}).get("mode") or "OFF")
+    selection_reason = "GRADE_SCORE_R_MODELRANK"
+    eligible_first = next((c for c in candidates if c.get("allowed")), None)
+    if candidates and eligible_first is not None and eligible_first is not candidates[0]:
+        if selection_mode == "LIVE":
+            candidates = [eligible_first] + [c for c in candidates if c is not eligible_first]
+            selection_reason = "ELIGIBLE_PREFERRED_OVER_HIGHER_SCORE_WATCH"
+        elif selection_mode == "SHADOW":
+            selection_reason = "GRADE_SCORE_R_MODELRANK(ELIGIBLE_AVAILABLE_SHADOW)"
     if not candidates:
         return {"phase": str((bundle or {}).get("phase") or os.environ.get("NQX_PHASE", "EVAL_STRIKE")).upper(),
                 "model": "FLAT", "side": "FLAT", "state": "WATCH", "grade": None,
                 "score": 0, "entry": None, "stop": None, "targets": [], "targetR": [],
-                "hardBlockers": ["NO_A_OR_A_PLUS_MODEL"], "penalties": [], "evidence": []}
+                "hardBlockers": ["NO_A_OR_A_PLUS_MODEL"], "penalties": [], "evidence": [],
+                **_structure_decision_fields({}, context, structure_policy, selection_reason)}
     chosen = candidates[0]
     phase = str((bundle or {}).get("phase") or os.environ.get("NQX_PHASE", "EVAL_STRIKE")).upper()
     if phase not in EVAL_PHASES:
@@ -3945,19 +4153,88 @@ def select_primary(candidates, bundle=None):
         **({"restingLimit": True} if chosen.get("restingLimit") else {}),
         **({"ictStdv": _compact_stdv_audit(chosen["ictStdv"])} if chosen.get("ictStdv") else {}),
         "modelRank": [c["model"] + ":" + str(c.get("grade")) for c in candidates[:4]],
+        # R122: 最小形式の文脈・参加の証跡。**全段 OFF ではキーごと足さない**
+        # (出力を R122 以前と同一に保つ)。`structure` はカード縮小でも落とさない。
+        **_structure_decision_fields(chosen, context, structure_policy, selection_reason),
     }
 
 
-def strategy_evaluation(bundle, result, bars, levels, nf, ict):
+def _structure_decision_fields(chosen, context, structure_policy, selection_reason):
+    """R122 §6 の最小形式を decision へ載せる。段が全部 OFF なら空 dict。"""
+    if not structure_context_active(structure_policy) or not isinstance(context, dict):
+        return {}
+    try:
+        import market_structure_context
+        import participation_policy
+    except Exception:  # noqa: BLE001
+        return {}
+    audit = chosen.get("participation") if isinstance(chosen, dict) else None
+    part = participation_policy.compact(audit) or {}
+    thesis = context.get("thesis") or {}
+    minimal = {
+        "contextVersion": context.get("contextVersion"),
+        "thesisId": thesis.get("structureId"),
+        "participationState": part.get("state"),
+        "triggerEvidenceIds": part.get("triggerEvidenceIds") or [],
+        "invalidation": part.get("invalidation") or thesis.get("invalidationRule"),
+        "selectionReason": selection_reason,
+        "changedFromBaseline": list(chosen.get("changedFromBaseline") or []),
+        "relation": context.get("childRelation"),
+        "orderIntent": part.get("orderIntent"),
+        "shallow": bool(chosen.get("r122Shallow")),
+    }
+    return {"structure": minimal,
+            "structureDetail": {"context": market_structure_context.compact(context),
+                                "participation": part}}
+
+
+def strategy_evaluation(bundle, result, bars, levels, nf, ict, tol=None, structure_policy=None):
     """R11-Dの候補・decisionを一括生成する。外部状態を変更しない。"""
     matrix = result.get("strategyMatrix")
     if not isinstance(matrix, dict):
         matrix = strategy_models.build_strategy_matrix(bundle, bars, levels, ict or {})
         result["strategyMatrix"] = matrix
     result["silverBullet"] = silver_bullet_evaluation(bundle, levels, nf)
-    candidates = build_candidates(bundle, result, bars, levels, ict or {}, nf, matrix)
+    # R122: 文脈は候補を作る**前**に 1 回だけ作る。段が全部 OFF なら None のままで、
+    # 契約 JSON も読まない(判定・出力・I/O が R122 以前と同一になる)。
+    policy = structure_context_policy() if structure_policy is None else structure_policy
+    context = None
+    if structure_context_active(policy):
+        if tol is None:
+            tol = max(params()["touch_pt"], 0.10 * (nf or 0))
+        context = _structure_context_for(bundle, result, bars, ict or {}, nf, tol, policy)
+        result["structureContext"] = context
+    candidates = build_candidates(bundle, result, bars, levels, ict or {}, nf, matrix,
+                                  context=context, structure_policy=policy)
     # R89: 契約で外した候補は primary に選ばない(別モデルが primary になれる)。
-    decision = select_primary([c for c in candidates if not c.get("modelGate")], bundle)
+    pool = [c for c in candidates if not c.get("modelGate")]
+    if context is not None:
+        # 「R122 が無ければどれが primary だったか」を同じ候補集合から出す。追加候補を
+        # 除き、この層が足したブロッカーだけを外した並びで選び直す(再評価はしない)。
+        baseline_pool = []
+        for candidate in pool:
+            if candidate.get("r122Shallow"):
+                continue
+            if candidate.get("participationBlocked"):
+                shadow = dict(candidate)
+                shadow["hardBlockers"] = [b for b in (candidate.get("hardBlockers") or ())
+                                          if b not in (candidate.get("participationBlocked") or ())]
+                shadow["allowed"] = not shadow["hardBlockers"] and \
+                    candidate.get("grade") in {"A", "A+", "B"}
+                shadow["state"] = "ARMED" if shadow["allowed"] else "WATCH"
+                baseline_pool.append(shadow)
+                continue
+            baseline_pool.append(candidate)
+        baseline = select_primary(baseline_pool, bundle)
+        decision = select_primary(pool, bundle, context=context, structure_policy=policy)
+        changed = []
+        for field in ("model", "side", "state", "grade", "entry", "stop", "decisionId"):
+            if decision.get(field) != baseline.get(field):
+                changed.append(f"{field}:{baseline.get(field)}→{decision.get(field)}")
+        decision.setdefault("structure", {})["changedFromBaseline"] = changed
+        decision["structure"]["baselineDecisionId"] = baseline.get("decisionId")
+    else:
+        decision = select_primary(pool, bundle)
     decision["smt"] = (ict or {}).get("smt") or {}
     decision["ictSession"] = (ict or {}).get("session") or {}
     decision["ictCoverage"] = ict_coverage(bundle, ict, matrix)
@@ -4024,6 +4301,9 @@ def decision_to_scenario(decision, bundle, qty=2):
         "eligibleVotes": decision.get("eligibleVotes") or {},
         "evidenceHash": decision.get("evidenceHash"),
         "executionBlockers": execution_blockers,
+        # R122: 最終判断の理由と ID を凍結プランまで運ぶ。全段 OFF ではキーごと無い
+        # (出力を R122 以前と同一に保つ)。
+        **({"structure": decision["structure"]} if decision.get("structure") else {}),
     }
 
 
@@ -4213,7 +4493,7 @@ def evaluate(bundle, prm=None):
         snapshot.get("smtObservation", bundle.get("smtObservation")))
 
     result["candidates"], result["decision"] = strategy_evaluation(
-        bundle, result, bars, levels, nf, result["ict"])
+        bundle, result, bars, levels, nf, result["ict"], tol=tol)
 
     result["summary"] = summarize(result, prm)
     decision = result.get("decision") or {}
@@ -4500,6 +4780,9 @@ def build_card(result, sl_cap=None, price=None, side=None,
                 "entryMode", "entry", "stop", "targets", "targetR", "hardBlockers",
                 "penalties", "evidence", "modelRank", "strategyModels", "strategyAlignment", "strategyBias",
                 "silverBullet", "vwapStop", "poolStop", "sweepGate",
+                # R122: `structure` は最小形式で、縮小しても落とさない(§6 の要求)。
+                # `structureDetail` は監査で、evidence より先に落ちる。
+                "structure", "structureDetail",
             ) if key in decision
         }
     msnr = _card_msnr(result, price, side)
@@ -4692,6 +4975,10 @@ def _shrink_card(card):
         decision.pop("sweepGate", None)
         # R121: STDV の監査も SHADOW の記録なので evidence タグより先に落とす。
         decision.pop("ictStdv", None)
+        # R122: 詳細(親の events / 子の全状態)は再生で復元できるので先に落とす。
+        # **`decision["structure"]`(最小形式)は最後まで残す** —— 最終判断の理由と
+        # ID がカード縮小で消えないことが §6 の要求。
+        decision.pop("structureDetail", None)
         if _card_bytes(card) <= CARD_MAX_BYTES:
             return card
         decision.pop("modelRank", None)

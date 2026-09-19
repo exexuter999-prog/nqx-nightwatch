@@ -138,6 +138,26 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   projected loss で判定するので効き続ける。**TURTLE 復活と STDV 採用は別の判断。** 検証は
   `python tests/test_r121_ict_stdv.py` / `python replay_ict_stdv.py --replay` /
   `python verify_r119_live.py`(読むだけ)。戻しは各段の `mode` を `OFF` にする 1 語。
+- **多層構造文脈と参加判断(R122, 2026-09-19)**: 設定は `execution_contract.json` の
+  `structureContext`、実装は `market_structure_context.py` / `participation_policy.py`、根拠と
+  A/B/C/D/E 比較は `docs/R122_STRUCTURE_CONTEXT_AND_PARTICIPATION.md`、知識仕様表は
+  `docs/R122_STRATEGY_KNOWLEDGE_SPEC.md`。**親の仮説**(方向・目標・否定水準・寿命)を
+  直接取得した確定 15 分足 `snapshot.bars15m` から作り、無ければ既存 `htfContext`(45m 以上の
+  確定足要約)へ落ちる。**3 分足から上位足を合成しない。** 親子関係は `CONTINUATION` /
+  `PULLBACK` / `REVERSAL_CANDIDATE` / `UNRESOLVED` で、親 BUY・子 SELL を「矛盾だから不成立」に
+  しない。段は 5 つ独立: `context`(**LIVE**)/ `participation`(**LIVE**)/ `shallowCandidate`
+  (**SHADOW**)/ `selection`(**OFF**)/ `nearTerm`(**SHADOW**。未校正なので LIVE にできない)。
+  参加状態(`ENTRY_READY` / `WAIT_FOR_PULLBACK` / `WAIT_FOR_CONFIRMATION` / `NO_ROOM` /
+  `INVALIDATED` / `EXPIRED` / `CONTEXT_UNAVAILABLE`)と根拠 ID は `decision.structure` と凍結
+  プランに残る(カード縮小でも落とさない)。**この層が足すブロッカーは `PARENT_THESIS_INVALIDATED`
+  の 1 つだけで、親と同じ方向の候補にしか掛からない** —— 逆方向の独立したセットアップは止めない。
+  保有建玉の管理(engine / order.py)は R122 を一切参照しない。監査 1,359 本で**全段 OFF は
+  R122 以前とバイト一致**、本番構成でも**注文意図の変化 0**。浅い代替候補は逐次再生で悪化した
+  ため(ΣR +7.71 → +6.71、区間 [−0.08,−0.02])SHADOW に留めている。記憶は
+  `.secrets/structure_context_state.json`(発注台帳とは別)。検証は
+  `python verify_r122_live.py` / `python tests/test_r122_structure_context.py` /
+  `python replay_structure_context.py --replay [--bars15m]`(読むだけ)。戻しは各段の `mode` を
+  `OFF` にする 1 語。
 - **指値の門(R119, 2026-09-19 ユーザー決定)**: 設定は `execution_contract.json` の `limitGate`、根拠は
   `docs/R119_LIMIT_GATE.md`。**新規武装だけ**に掛かる 2 門で、保有建玉の管理(MODIFY / FLATTEN /
   追撃)は読まない。(1) `gapCap`(**LIVE / maxGapR 1.5**): 発注時に LIMIT になる候補で

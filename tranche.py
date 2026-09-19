@@ -520,7 +520,7 @@ def build_composite_plan(base_plan: Dict[str, Any], tranches: List[Dict[str, Any
         **{key: base_plan.get(key) for key in (
             "planVersion", "scenarioId", "fingerprint", "evidenceHash", "marketCycleId",
             "decisionId", "symbol", "model", "grade", "targetR", "riskCapPoints",
-            "riskCapDollars", "riskCapSource", "decisionEvidence")},
+            "riskCapDollars", "riskCapSource", "decisionEvidence", "decisionStructure")},
         "planKind": PLAN_KIND,
         "entryKey": _text(entry_key),
         "accountScope": [_text(account)],

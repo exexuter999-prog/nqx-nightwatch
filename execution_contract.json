@@ -273,6 +273,31 @@
       "mode": "LIVE"
     }
   },
+  "structureContext": {
+    "_note": "R122(2026-09-19, docs/R122_STRUCTURE_CONTEXT_AND_PARTICIPATION.md): 多層構造文脈(親の仮説 / 子の構造 / 親子関係)と参加判断。段は 5 つとも独立で、それぞれ OFF / SHADOW / LIVE に戻せる。context: 親の仮説を作って記録する(LIVE = participation の入力になる)。親の出所は直接取得した確定 15 分足 snapshot.bars15m、無ければ既存 htfContext(45m/1h/4h/1d の確定足要約)。3 分足から上位足を合成しない。participation: 候補ごとの参加状態(ENTRY_READY / WAIT_FOR_PULLBACK / WAIT_FOR_CONFIRMATION / NO_ROOM / INVALIDATED / EXPIRED / CONTEXT_UNAVAILABLE)を decision と凍結プランへ残す。LIVE のときだけ PARENT_THESIS_INVALIDATED を hardBlockers に足すが、**その親に依存する候補(同方向で HTF_ALIGNED が効いている継続、およびこの層が作った追加候補)だけ**に限定する。逆方向の独立したセットアップは止めない。shallowCandidate: 深い押しが来ない場面で、子の確認済み構造の後にできた適格 FVG へ指値で参加する代替候補(§4.2)。同じ方向に発注できる候補が既にあるときは作らない。SHADOW は記録だけで primary にならない。selection: 高得点の WATCH 候補が同じ周期の ARMED 候補より先に primary になる現行契約を、ARMED 優先へ変える段(監査 1,359 本で 15 周期が該当)。nearTerm: 次の 1 本 / 5 本の確定 3 分足に対する方向(3 分 / 15 分)。**表示・評価専用で LIVE にできない** —— 未校正の予測を武装ゲートにしないため、LIVE は検証器とテストが拒否する。Entry/SL/枚数/口座別上限/AUTO/所有権/発注前検査/保有建玉の凍結プランは一切変えない。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R122-STRUCTURE-CONTEXT-1",
+    "schema": "NQX_STRUCTURE_CONTEXT/1",
+    "_decisionNote": "2026-09-19: context=LIVE / participation=LIVE / shallowCandidate=SHADOW / selection=OFF / nearTerm=SHADOW。根拠は docs/R122_STRUCTURE_CONTEXT_AND_PARTICIPATION.md §8 の A/B/C/D/E 比較(監査バンドル 1,358 本 + 直接取得した 15 分足がある 118 本)。(1) OFF は HEAD と decision・候補・summary が 1,359 本すべてでバイト一致。(2) B(全段 SHADOW)は注文意図の変化 0 件。(3) C(context+participation LIVE)も注文意図の変化 0 件 —— PARENT_THESIS_INVALIDATED は「親の時間足の確定終値が保護水準を抜けた」ときだけ、しかも**同じ方向の候補だけ**に掛かる fail-closed のガードで、この 2 コーパスでは 1 度も発火していない(武装を増やす経路は無い)。効果は「根拠(thesisId / participationState / triggerEvidenceIds / invalidation / relation / orderIntent)が decision と凍結プランに残ること」と、15 分足が入る本番で親の否定が効くこと。(4) D(浅い代替候補)は**逐次 ΣR が +7.71 → +6.71(−1.00R)、最大 DD −3.97 → −4.97R、セットアップ単位 −0.047R/setup、区間 [−0.08,−0.02] が 0 を跨がない**ので LIVE にしない。実装・配線・試験は完了しているので SHADOW(記録のみ)で残す。(5) selection(高得点 WATCH より ARMED を優先)は逐次 +8.91R(A 比 +1.20R)だがセットアップ単位は −0.009R/setup で区間が 0 を跨ぎ、同じ周期で建てる**方向が反転**しうる。該当は 1,358 本中 28 周期。人の判断を待って OFF のまま。戻すのは各段の mode を OFF にする 1 語。費用は再生に含まれていない。",
+    "context": {
+      "mode": "LIVE"
+    },
+    "participation": {
+      "mode": "LIVE"
+    },
+    "shallowCandidate": {
+      "mode": "SHADOW"
+    },
+    "selection": {
+      "mode": "OFF"
+    },
+    "nearTerm": {
+      "mode": "SHADOW",
+      "_liveForbidden": "未校正の短期予測を武装ゲートにしない(§3)。LIVE は verify_r122_live.py と tests/test_r122_structure_context.py が拒否する。"
+    },
+    "params": {
+      "maxPlans": 6
+    }
+  },
   "fillWatch": {
     "_note": "R91(2026-09-15, docs/R91_FILL_WATCH_REALTIME.md): 約定監視 fill_watch.py の常駐と照会間隔。CrossTrade の Tradovate 口座は REST のみ(WebSocket は NinjaTrader 8 口座だけ、約定のプッシュ通知も無い)なので、上限(利用者ごと毎秒 3 回・溜め 20 回、REST と WebSocket で共有、超過は 429)の中で照会を詰める。autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっていれば切り離したプロセスとして起動し直す(単一インスタンス、出力は .secrets/fill_watch.log)。fastIntervalSec = 建玉がある間の間隔 / idleIntervalSec = FLAT の間隔 / maxRequestsPerSec = fill_watch 自身の上限(ループの照会と送信後照会の分を残す。FLAT の照会は裏取りで 2 本) / rateLimitBackoffSec = 429 を見たら空ける秒数。ループの reconcile 中は照会しない。",
     "version": "R91-FILL-WATCH-1",

@@ -451,6 +451,14 @@ def build_management_plan(scenario: Dict[str, Any], bundle: Optional[Dict[str, A
         "decisionEvidence": [str(x) for x in (
             (((bundle or {}).get("evaluation") or {}).get("decision") or {})
             .get("evidence") or [])][:16],
+        # R122: 多層構造文脈と参加判断の最小形式(thesisId / participationState /
+        # triggerEvidenceIds / invalidation / selectionReason / changedFromBaseline)。
+        # `decisionEvidence` と同じく**表示・集計専用** —— 発注・管理の判定はこの
+        # フィールドを読まない(engine は R122 のモジュールを import もしない)。
+        # 出所は publish 前のローカル評価カードなので、Worker の正規化で落ちない。
+        "decisionStructure": (
+            (((bundle or {}).get("evaluation") or {}).get("decision") or {}).get("structure")
+            or scenario.get("structure") or None),
     }
 
 
