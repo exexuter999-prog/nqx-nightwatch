@@ -2879,8 +2879,29 @@ def _candidate_for_chain(model, level, chain, bars, levels, ict, regime_info, bu
     # 通れば SL は掃引極値の向こう。SHADOW: 記録だけ)。targets・R:R・上限・decisionId は最終の SL。
     stop, sweep_audit = _apply_sweep_gate(model, side, entry, stop_before_pool, stop, bars, levels,
                                           chain, bundle, nf)
-    targets = (targets_override if targets_override is not None
-               else model_targets(entry, stop, side, levels, ict, extra=extra_targets))
+    # R121: STDV アンカーは **最終の entry/stop が決まってから**作る(SL を動かす節の後)。
+    # OFF / SHADOW では `stdv_extra` は必ず空で、targets はこの節の前と同一になる。
+    stdv_policy = ict_stdv_policy()
+    stdv_audit, stdv_extra = _stdv_for_chain(model, level, chain, bars, side, entry, stop,
+                                             None, bundle, nf, stdv_policy)
+    if targets_override is not None:
+        targets = targets_override
+    else:
+        base_targets = model_targets(entry, stop, side, levels, ict, extra=extra_targets)
+        targets = base_targets
+        if stdv_extra:
+            merged = list(extra_targets or ()) + list(stdv_extra)
+            with_stdv = model_targets(entry, stop, side, levels, ict, extra=merged)
+            runner_label = str(with_stdv[-1][1]) if len(with_stdv) == 2 else ""
+            runner_is_stdv = runner_label.startswith("STDV_")
+            if runner_is_stdv and not (stdv_policy.get("targets") or {}).get("runnerEligible"):
+                # `-4` 等で runner が不当に遠くなるのを防ぐ。STDV 単独で遠い TP を
+                # 正当化しない(docs/R121_ICT_STDV.md §4)。理由は監査に残す。
+                stdv_audit["runnerRejected"] = True
+            elif with_stdv and with_stdv != base_targets:
+                targets = with_stdv
+                stdv_audit["targetsApplied"] = True
+                stdv_audit["baseTargets"] = [item[0] for item in base_targets]
     candidate = {
         "model": model, "side": side, "entry": entry, "stop": stop,
         "targets": [item[0] for item in targets],
@@ -2895,6 +2916,32 @@ def _candidate_for_chain(model, level, chain, bars, levels, ict, regime_info, bu
         "strategyModels": [], "strategyAlignment": 0,
         "evidence": [], "hardBlockers": [], "penalties": [], "score": 0,
     }
+    if stdv_audit is not None:
+        # R121: 投影と「読み」は記録専用。採点・等級・確認要素(CONFIRMATION_EVIDENCE)には
+        # 入れない —— 現在地が投影目標に近いことだけで方向の確信を加算しないため。
+        candidate["ictStdv"] = stdv_audit
+        anchor = stdv_audit.get("anchor") or {}
+        if anchor.get("projectionValid") is True:
+            candidate["evidence"].append("ICT_STDV_ANCHOR")
+        if stdv_audit.get("targetsApplied"):
+            candidate["evidence"].append("ICT_STDV_TARGET")
+            # TP が変わったので decisionId も変える(「価格を変えたが ID 不変」で
+            # 過去 claim を流用しない)。setup_identity がこのキーを読む。
+            candidate["stdvIdentity"] = "|".join(
+                [str(anchor.get("anchorId"))] + [str(item[0]) for item in targets])
+        if stdv_audit.get("runnerRejected"):
+            candidate["evidence"].append("ICT_STDV_RUNNER_REJECTED")
+        # 「読み」は最終の targets で引き直す(headroom が実際に出す注文と一致する形にする)。
+        if anchor.get("anchorId"):
+            try:
+                import ict_stdv
+                gate_last, _reason = gate_price(bundle)
+                stdv_audit["read"] = ict_stdv.read_context(
+                    anchor, side=side, entry=entry, stop=stop, price=gate_last,
+                    price_known=gate_last is not None,
+                    targets=[item[0] for item in targets])
+            except Exception:  # noqa: BLE001 - 読みの失敗で候補を落とさない
+                pass
     if vwap_audit is not None:
         candidate["vwapStop"] = vwap_audit
         if vwap_audit.get("applied"):
@@ -3374,6 +3421,121 @@ def model_gate_blocker(candidate, rules):
     return None
 
 
+#: R121: ICT STDV(execution_contract.json の ictStdv)。段は 3 つとも独立。
+ICT_STDV_MODES = ("OFF", "SHADOW", "LIVE")
+
+
+def ict_stdv_policy(contract=None):
+    """``ictStdv`` を ``{"mode", "targets", "participation", "params", "invalid"}`` にする。
+
+    節が無い・読めない・形が壊れているときは全部 OFF(= R121 以前と同じ判定)。壊れた
+    段はその段だけ OFF にして ``invalid`` に残す(本番契約に不正な段が無いことは試験が見る)。
+    """
+    off = {"mode": "OFF", "targets": {"mode": "OFF"}, "participation": {"mode": "OFF"},
+           "params": {}, "invalid": []}
+    if contract is None:
+        try:
+            with open(CONTRACT_PATH, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            return {**off, "invalid": ["CONTRACT_UNREADABLE"]}
+    raw = contract.get("ictStdv") if isinstance(contract, dict) else None
+    if raw is None:
+        return off
+    if not isinstance(raw, dict):
+        return {**off, "invalid": ["ICT_STDV_MALFORMED"]}
+    out = {"mode": "OFF", "targets": {"mode": "OFF"}, "participation": {"mode": "OFF"},
+           "params": {}, "invalid": []}
+    mode = str(raw.get("mode") or "OFF").strip().upper()
+    if mode not in ICT_STDV_MODES:
+        out["invalid"].append("ICT_STDV_MODE_MALFORMED")
+    else:
+        out["mode"] = mode
+    targets = raw.get("targets")
+    if isinstance(targets, dict):
+        tmode = str(targets.get("mode") or "OFF").strip().upper()
+        ratios = targets.get("ratios")
+        try:
+            import ict_stdv
+            allowed = set(ict_stdv.RATIOS)
+        except Exception:  # noqa: BLE001 - モジュールが無ければこの段は OFF
+            allowed = set()
+        ratios = [float(r) for r in ratios if _finite_num(r) is not None and float(r) in allowed] \
+            if isinstance(ratios, list) else None
+        if tmode not in ICT_STDV_MODES or (tmode != "OFF" and not ratios):
+            out["invalid"].append("ICT_STDV_TARGETS_MALFORMED")
+        else:
+            out["targets"] = {"mode": tmode, "ratios": ratios or [],
+                              "runnerEligible": targets.get("runnerEligible") is True}
+    elif targets is not None:
+        out["invalid"].append("ICT_STDV_TARGETS_MALFORMED")
+    participation = raw.get("participation")
+    if isinstance(participation, dict):
+        pmode = str(participation.get("mode") or "OFF").strip().upper()
+        if pmode not in ICT_STDV_MODES:
+            out["invalid"].append("ICT_STDV_PARTICIPATION_MALFORMED")
+        else:
+            out["participation"] = {"mode": pmode}
+    elif participation is not None:
+        out["invalid"].append("ICT_STDV_PARTICIPATION_MALFORMED")
+    params = raw.get("params")
+    out["params"] = dict(params) if isinstance(params, dict) else {}
+    return out
+
+
+def _finite_num(value):
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and abs(out) != float("inf") else None
+
+
+def _stdv_for_chain(model, level, chain, bars, side, entry, stop, targets, bundle, nf, policy):
+    """R121: 候補 1 件の STDV 監査。``(audit, extra_targets)``。
+
+    ``extra_targets`` は ``targets.mode == "LIVE"`` のときだけ中身が入る。OFF / SHADOW は
+    必ず空 —— 注文意図・Entry/SL/TP・decisionId を変えないため(受け入れ試験)。
+    """
+    if not isinstance(policy, dict) or policy.get("mode") == "OFF":
+        return None, []
+    try:
+        import ict_stdv
+    except Exception as exc:  # noqa: BLE001 - 読めなければ「STDV なし」に倒す
+        return {"mode": policy.get("mode"), "reason": f"MODULE_UNAVAILABLE:{type(exc).__name__}"}, []
+    snapshot = bundle.get("snapshot") if isinstance(bundle, dict) and isinstance(
+        bundle.get("snapshot"), dict) else {}
+    diag = ict_stdv.anchor_diagnosis(
+        chain, bars, noise_floor=nf, params=policy.get("params"),
+        symbol=(bundle or {}).get("sourceSymbol") or snapshot.get("sourceSymbol"),
+        session_id=(bundle or {}).get("sessionId") or snapshot.get("sessionId"),
+        level=level)
+    anchor = diag.get("anchor")
+    audit = {"mode": policy.get("mode"), "targetsMode": (policy.get("targets") or {}).get("mode"),
+             "participationMode": (policy.get("participation") or {}).get("mode"),
+             "reason": diag.get("reason"), "anchor": None, "read": None,
+             "targetsOffered": [], "targetsApplied": False, "runnerRejected": False}
+    if not isinstance(anchor, dict):
+        return audit, []
+    # 到達判定は **knownAt 以後の確定足**と、鮮度確認済みの現値だけで行う(R119 と同じ関数)。
+    gate_last, _gate_reason = gate_price(bundle)
+    anchor = ict_stdv.mark_reached(anchor, bars=bars, price=gate_last,
+                                   price_known=gate_last is not None)
+    audit["anchor"] = anchor
+    audit["read"] = ict_stdv.read_context(
+        anchor, side=side, entry=entry, stop=stop, price=gate_last,
+        price_known=gate_last is not None, targets=targets)
+    if diag.get("reason"):
+        return audit, []
+    trule = policy.get("targets") or {}
+    offered = ict_stdv.target_candidates(anchor, entry, stop, side,
+                                         target_ratios=trule.get("ratios") or ())
+    audit["targetsOffered"] = [{"price": price, "label": label} for price, label in offered]
+    if str(trule.get("mode") or "OFF").upper() != "LIVE":
+        return audit, []
+    return audit, list(offered)
+
+
 #: R119: 新規武装だけに掛かる 2 つの門(execution_contract.json の limitGate)。
 #: gapCap = 指値が現値から遠すぎる / targetPassed = 現値が既に TP1 を通過している。
 LIMIT_GATE_BLOCKERS = {"gapCap": "LIMIT_GAP_EXCEEDED", "targetPassed": "TARGET_ALREADY_PASSED"}
@@ -3685,7 +3847,12 @@ def setup_identity(candidate):
     origin = chain.get("sweepBarT") if chain.get("type") == "SWEEP" else chain.get("breakBarT")
     level = candidate.get("level")
     stop = candidate.get("stop")
-    material = "|".join(str(x) for x in (candidate.get("model"), candidate.get("side"), level, origin, stop))
+    parts = [candidate.get("model"), candidate.get("side"), level, origin, stop]
+    # R121: STDV が実際に TP を差し替えた候補だけ、目標も同一性へ入れる。OFF / SHADOW と
+    # 差し替えの無い周期では `stdvIdentity` が無いので、ID は R121 以前と**バイト一致**する。
+    if candidate.get("stdvIdentity"):
+        parts.append(candidate["stdvIdentity"])
+    material = "|".join(str(x) for x in parts)
     return hashlib.sha1(material.encode()).hexdigest()[:12]
 
 

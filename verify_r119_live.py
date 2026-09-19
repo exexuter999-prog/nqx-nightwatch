@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""R119 の本番反映を、**発注も監視も通信もせずに**確認する(読むだけ)。
+"""R119 / R121 の本番反映を、**発注も監視も通信もせずに**確認する(読むだけ)。
 
     python verify_r119_live.py
 
@@ -170,6 +170,71 @@ else:
     else:
         ok("limitGate を上書きする環境変数は無い(この節に env の抜け道は作っていない)")
 
+# --------------------------------------------- 2b. R121 ICT STDV(同じ起動先)
+
+print("\n2b. R121 ICT STDV — 起動先が読むコード版と設定")
+probe121 = (
+    "import json, os\n"
+    "import ict_stdv, msnr_gate\n"
+    "print('@@' + json.dumps({\n"
+    "  'module': ict_stdv.__file__, 'schema': ict_stdv.SCHEMA, 'version': ict_stdv.VERSION,\n"
+    "  'ratios': list(ict_stdv.RATIOS), 'targetRatios': list(ict_stdv.TARGET_RATIOS),\n"
+    "  'policy': msnr_gate.ict_stdv_policy(),\n"
+    "  'hasFns': [hasattr(msnr_gate, n) for n in ('ict_stdv_policy','_stdv_for_chain')],\n"
+    "  'env': {k: v for k, v in os.environ.items() if 'STDV' in k.upper()},\n"
+    "}, default=str))\n"
+)
+proc = subprocess.run([sys.executable, "-c", probe121], cwd=BASE, env=child_env,
+                      capture_output=True, text=True)
+line = next((l for l in proc.stdout.splitlines() if l.startswith("@@")), None)
+if not line:
+    fail(f"R121 の検査が失敗した: {proc.stderr.strip()[:300]}")
+else:
+    info121 = json.loads(line[2:])
+    print(f"   ict_stdv      = {info121['module']}")
+    print(f"   schema/version= {info121['schema']} / {info121['version']}")
+    print(f"   係数          = {info121['ratios']}  目標に使う係数 = {info121['targetRatios']}")
+    print(f"   ictStdv       = {json.dumps(info121['policy'], ensure_ascii=False)}")
+    if os.path.normcase(os.path.dirname(info121["module"])) == os.path.normcase(BASE):
+        ok("ict_stdv は本番ディレクトリのものが読まれている")
+    else:
+        fail(f"ict_stdv が別の場所から読まれている: {info121['module']}")
+    if all(info121["hasFns"]):
+        ok("R121 の配線(ict_stdv_policy / _stdv_for_chain)が msnr_gate にある")
+    else:
+        fail("R121 の配線が無い = 変更前のコードが読まれている")
+    pol = info121["policy"]
+    if pol.get("invalid"):
+        fail(f"契約の ictStdv に不正な段がある: {pol['invalid']}")
+    else:
+        ok("ictStdv に不正な段が無い(不正な段は黙って OFF になるので必ず見る)")
+    if info121["ratios"] == [1.0, 0.0, -1.0, -2.0, -2.5, -4.0]:
+        ok("係数は出典の基本設定(1 / 0 / -1 / -2 / -2.5 / -4)")
+    else:
+        fail(f"係数が出典と違う: {info121['ratios']}")
+    if -4.0 not in (pol.get("targets") or {}).get("ratios", []):
+        ok("-4 は目標に使わない(観測専用)")
+    else:
+        fail("-4 が目標係数に入っている(runner が不当に遠くなる)")
+    if (pol.get("targets") or {}).get("runnerEligible") is False:
+        ok("runnerEligible=false(STDV 単独で runner へ昇格しない)")
+    else:
+        fail("runnerEligible が true になっている")
+    modes = (pol.get("mode"), (pol.get("targets") or {}).get("mode"),
+             (pol.get("participation") or {}).get("mode"))
+    print(f"   モード        = mode={modes[0]} / targets={modes[1]} / participation={modes[2]}")
+    if modes[0] in {"OFF", "SHADOW"} and modes[1] == "OFF" and modes[2] == "OFF":
+        ok(f"**判断を変えない構成**(mode={modes[0]} / targets=OFF / participation=OFF) "
+           "= 記録だけで損益に影響しない")
+    else:
+        print(f"   注意: 判断に影響する構成になっている(mode={modes[0]} / targets={modes[1]} / "
+              f"participation={modes[2]})。docs/R121_ICT_STDV.md §7 の受け入れ条件を確認する。")
+    if info121["env"]:
+        fail(f"環境変数で上書きされている疑い: {info121['env']}")
+    else:
+        ok("ictStdv を上書きする環境変数は無い")
+
+
 # ------------------------- 3. 保存済みの入力で門が実際に効くか(通信なし)
 
 print("\n3. 保存済みの入力で門が効くか(ファイルだけ。取得も照会もしない)")
@@ -243,5 +308,5 @@ if problems:
     for text in problems:
         print(f"  - {text}")
     raise SystemExit(1)
-print("R119 は本番の起動先に反映済み(gapCap=LIVE/1.5, targetPassed=LIVE)。"
-      "市場再開後の稼働確認は docs/R119_LIMIT_GATE.md §7 を見る。")
+print("R119 / R121 は本番の起動先に反映済み。市場再開後の稼働確認は "
+      "docs/R119_LIMIT_GATE.md §7(指値の門)と docs/R121_ICT_STDV.md §8(STDV)を見る。")

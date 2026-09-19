@@ -940,6 +940,18 @@ def build_strategy_matrix(bundle: Dict[str, Any], bars: Iterable[Dict[str, Any]]
         "rejectionWick": detect_rejection_wick(clean, levels),
         "fib": fib,
         "fibSd": fib_sd,
+        # R121: ICT STDV。**目標専用**なので方向票は 0(`targetOnly=True` を
+        # `_vote_direction` が弾く)。投影の健全性は `valid` ではなく
+        # `projectionValid` に持つ —— `_repo2_lifecycle` が targetOnly を
+        # `valid=False` にするので、汎用 valid を流用すると正常な目標まで
+        # 無効に見える(docs/reports/…AUDIT… §5 の指摘)。アンカー本体は
+        # 候補側の `candidate["ictStdv"]` が正本で、ここは存在の告知だけ。
+        "ictStdv": {
+            "status": "OBSERVE", "valid": False, "direction": None,
+            "targetOnly": True, "advisory": True, "projectionValid": None,
+            "schema": "NQX_ICT_STDV/1", "provenance": "candidate_scoped_anchor",
+            "evidence": ["ICT_STDV_TARGET_ONLY"],
+        },
         "ifvg": ifvg,
         "blocks": blocks,
         "quarterly": quarterly,

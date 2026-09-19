@@ -107,6 +107,23 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   逐次再生で改善せず(BREAKER を RISK_CAP_EXCEEDED の WATCH に変えるだけ)、ユーザー判断まで OFF。
   SL が変わる節は FLAT・primary なしのときに切り替える。検証は `python stop_logic.py --policy` /
   `python replay_stop_logic.py`(読むだけ)/ `python tests/test_r90_stop_logic.py`。
+- **ICT STDV(R121, 2026-09-19)**: 設定は `execution_contract.json` の `ictStdv`、実装は
+  `ict_stdv.py`、根拠と採用仕様表は `docs/R121_ICT_STDV.md`。`level(r) = p0 + r*(p1-p0)` の
+  固定投影(BUY は p0=下降 manipulation の起点高値 / p1=掃引した安値、SELL は鏡像。係数は
+  1 / 0 / -1 / -2 / -2.5 / -4)。**リスク倍率 R でも統計 σ でもない。** アンカー源は既存の
+  確定済み SWEEP チェーン(`MSS_CONFIRMED` / `RETEST_HELD`)だけで、モデル名で全 BREAKER へ
+  広げない。アンカー確定後は現値が EQ を通っても方向・p0・p1・anchorId を変えない。段は 3 つ
+  独立で、`mode`(アンカーと「読み」の記録)/ `targets.mode`(投影を既存 `model_targets` の
+  目標候補へ渡す)/ `participation.mode`。**既定は mode=SHADOW / targets=OFF /
+  participation=OFF = 記録だけで注文判断を変えない**(候補の `ictStdv` に監査が増えるだけで、
+  Entry/SL/TP/decisionId は R121 以前と一致)。STDV は方向票を持たない(`targetOnly=true`・
+  0 票)ので、投影の健全性は `valid` ではなく `projectionValid` で見る。`-4` は観測専用で
+  目標に使わない。runner が STDV になる周期は既定で採らず `runnerRejected` を残す。TP が
+  差し替わった候補だけ `stdvIdentity` が `setup_identity` に入り decisionId が変わる。
+  **2026-09-19 時点で損益改善は未実証** —— 逐次再生で BASE と同値(`docs/R121_ICT_STDV.md` §7)。
+  担い手がほぼ TURTLE で、それが `modelGate` で停止中のため最終判断に届かない。検証は
+  `python tests/test_r121_ict_stdv.py` / `python replay_ict_stdv.py --replay` /
+  `python verify_r119_live.py`(読むだけ)。戻しは各段の `mode` を `OFF` にする 1 語。
 - **指値の門(R119, 2026-09-19 ユーザー決定)**: 設定は `execution_contract.json` の `limitGate`、根拠は
   `docs/R119_LIMIT_GATE.md`。**新規武装だけ**に掛かる 2 門で、保有建玉の管理(MODIFY / FLATTEN /
   追撃)は読まない。(1) `gapCap`(**LIVE / maxGapR 1.5**): 発注時に LIMIT になる候補で

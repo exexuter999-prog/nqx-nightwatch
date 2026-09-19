@@ -238,6 +238,28 @@
       }
     ]
   },
+  "ictStdv": {
+    "_note": "R121(2026-09-19, docs/R121_ICT_STDV.md): ICT Standard Deviation Projections(TTrades 版)。level(r) = p0 + r*(p1-p0) の固定投影。BUY は p0=下降 manipulation の起点高値 / p1=掃引した安値、SELL は鏡像。**リスク倍率 R でも統計 σ でもない。** アンカー源は既存の確定済み SWEEP チェーン(MSS_CONFIRMED / RETEST_HELD)だけで、モデル名で全 BREAKER/TURTLE へ広げない。アンカー確定後は現値が EQ を通っても方向・p0・p1 を変えない(別の掃引は別 anchorId)。mode は OFF / SHADOW=記録のみ / LIVE=候補の参加判断へ反映。targets.mode は別の段で、LIVE のときだけ投影を既存 model_targets の目標候補へ渡す(最小 R・重複除去・runner 選定は既存規則に任せる)。targets.ratios の既定は -1/-2/-2.5 で、**-4 は観測専用**(runner が不当に遠くなるため。runnerEligible=true と明示比較が要る)。participation.mode も別の段で、到達済み目標と残り値幅を参加判断に使う。投影域へ触れたことをハードブロックにはしない。STDV は方向票を持たない(targetOnly=true / 0 票)ので、投影の健全性は valid ではなく projectionValid で持つ。Entry/SL/枚数/口座別上限/R119/AUTO/所有権/発注前検査は一切変えない。保有中の凍結済み TP/SL も変えない。検証は python tests/test_r121_ict_stdv.py / python replay_ict_stdv.py(読むだけ)。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R121-ICT-STDV-1",
+    "schema": "NQX_ICT_STDV/1",
+    "_decisionNote": "2026-09-19: 初期導入は mode=SHADOW(アンカーと投影を記録するだけ。注文意図・Entry/SL/TP・decisionId は不変)、targets=OFF、participation=OFF。**SHADOW は損益改善の実証ではない。** LIVE 昇格は docs/R121_ICT_STDV.md §7 の受け入れ条件と逐次再生の結果が揃ってから。",
+    "mode": "SHADOW",
+    "targets": {
+      "mode": "OFF",
+      "ratios": [-1.0, -2.0, -2.5],
+      "runnerEligible": false
+    },
+    "participation": {
+      "mode": "OFF"
+    },
+    "params": {
+      "pivotBars": 2,
+      "maxLegBars": 40,
+      "minLegTicks": 8,
+      "minLegNf": 0.5,
+      "maxAgeBars": 120
+    }
+  },
   "limitGate": {
     "_note": "R119(2026-09-19, docs/R119_LIMIT_GATE.md): **新規武装だけ**に掛かる 2 つの門。保有建玉の管理(凍結プランの MODIFY / FLATTEN / 追撃)はこの節を一切読まない。gapCap: 発注時に LIMIT になる候補(建値が現値の先)について |現値-建値|/リスク幅 = gapR が maxGapR を超えたら primary に選ばない。MARKET になる候補(建値が現値を通過している)には掛けない —— 指値専用の向き判定で成行候補を落とさないため、判定は autotrade_engine._entry_order_type と同じ式を使う。targetPassed: 現値が既に TP1 に到達/通過している候補を新規武装しない(BUY は 現値 >= tp1、SELL は 現値 <= tp1。向きを区別する)。どちらも鮮度確認済みの現値(bundle.price と priceAt が scenario.maxAgeSec 以内)でだけ判定し、確認できない周期は掛けずに理由を limitGate.reason に残す(相場データの古さは pipeline が先に BLOCK する)。mode: OFF / SHADOW=記録のみ / LIVE=primary から外す(hardBlockers に LIMIT_GAP_EXCEEDED / TARGET_ALREADY_PASSED を付けて WATCH。別モデルが primary になれる)。SL も建値も書き換えないので decisionId は変わらない。書き換えたら python tests/test_r119_limit_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
     "version": "R119-LIMIT-GATE-1",
