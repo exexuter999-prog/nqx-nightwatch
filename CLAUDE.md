@@ -126,13 +126,16 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   0 票)ので、投影の健全性は `valid` ではなく `projectionValid` で見る。`-4` は観測専用で
   目標に使わない。runner が STDV になる周期は既定で採らず `runnerRejected` を残す。TP が
   差し替わった候補だけ `stdvIdentity` が `setup_identity` に入り decisionId が変わる。
-  **STDV TARGETS は本番未採用(`targets.mode=OFF`)。** TURTLE 復活後の A/B/C 比較
-  (`docs/R121_ICT_STDV.md` §11)では、targets を LIVE にすると逐次 ΣR +6.71 → +7.71(+0.99R)
-  になるが、その**ほぼ全部が 1 セットアップ**(09-11 の WATCH→ARMED 転換 4 周期)由来で、
-  費用(片道 $5・SL 20pt で往復 ≈ 0.25R)を引くと +0.74R 相当、bootstrap 区間も 0 を跨ぐ。
-  採用の根拠に足りないので `SHADOW` で記録を続ける。**TURTLE 復活と STDV 採用は別の判断。**
-  `participation` は配線だけで未実装(LIVE と表示しない)。復活後は STDV が primary に載る
-  周期が再生で 92/1358 あり、TP が実際に差し替わるのは 12 周期(別セットアップ 3 件)。検証は
+  **2026-09-19 ユーザー決定で STDV を利確目標の選択に本番で使う: `mode=LIVE` /
+  `targets.mode=LIVE` / `targets.ratios=[-1,-2,-2.5]` / `runnerEligible=false`。**
+  損益改善の実証とは分けた採用判断(A/B/C 比較は `docs/R121_ICT_STDV.md` §11、投入の確認は §12)。
+  `participation` は**未実装**なので OFF 固定 —— LIVE と表示しない(`verify_r119_live.py` と
+  試験の両方が OFF を要求する)。`-4` の runner 採用も含めない。
+  **リスクは変わらない**: STDV は Entry/SL/枚数に触れないので、口座別 `RISK_=200`(2 枚・
+  SL 上限 50pt)も凍結プランの `riskCapDollars` も OFF と同一。本番契約で監査バンドル 1358 本を
+  通した実測では、TP が差し替わる周期 12(うち ARMED 5)・SL 幅は最大 31.25pt($125)で
+  **$200 / 50pt 超は 0 件**。ULTRA でも枚数は runner 脚が支配してほぼ動かず、上限は
+  projected loss で判定するので効き続ける。**TURTLE 復活と STDV 採用は別の判断。** 検証は
   `python tests/test_r121_ict_stdv.py` / `python replay_ict_stdv.py --replay` /
   `python verify_r119_live.py`(読むだけ)。戻しは各段の `mode` を `OFF` にする 1 語。
 - **指値の門(R119, 2026-09-19 ユーザー決定)**: 設定は `execution_contract.json` の `limitGate`、根拠は

@@ -564,8 +564,11 @@ def _compact_stdv_audit(audit):
         compact["levels"] = {str(row.get("ratio")): row.get("price")
                              for row in (anchor.get("levels") or [])
                              if isinstance(row, dict) and (row.get("ratio") or 0) < 0}
-    if audit.get("baseTargets"):
-        compact["baseTargets"] = audit["baseTargets"]
+    if audit.get("targetsApplied"):
+        # 差し替えた周期は**必ず**差し替え前を残す。空リストでも落とさない ——
+        # 「基準に梯子が無かった(= STDV が梯子を作った)」と「記録していない」を
+        # 区別できなくなるため(実運用のログで `None` に見えていた)。
+        compact["baseTargets"] = list(audit.get("baseTargets") or [])
     if audit.get("targetsOffered"):
         compact["offered"] = [row.get("price") for row in audit["targetsOffered"]
                               if isinstance(row, dict)]

@@ -237,10 +237,10 @@
     "_note": "R121(2026-09-19, docs/R121_ICT_STDV.md): ICT Standard Deviation Projections(TTrades 版)。level(r) = p0 + r*(p1-p0) の固定投影。BUY は p0=下降 manipulation の起点高値 / p1=掃引した安値、SELL は鏡像。**リスク倍率 R でも統計 σ でもない。** アンカー源は既存の確定済み SWEEP チェーン(MSS_CONFIRMED / RETEST_HELD)だけで、モデル名で全 BREAKER/TURTLE へ広げない。アンカー確定後は現値が EQ を通っても方向・p0・p1 を変えない(別の掃引は別 anchorId)。mode は OFF / SHADOW=記録のみ / LIVE=候補の参加判断へ反映。targets.mode は別の段で、LIVE のときだけ投影を既存 model_targets の目標候補へ渡す(最小 R・重複除去・runner 選定は既存規則に任せる)。targets.ratios の既定は -1/-2/-2.5 で、**-4 は観測専用**(runner が不当に遠くなるため。runnerEligible=true と明示比較が要る)。participation.mode も別の段で、到達済み目標と残り値幅を参加判断に使う。投影域へ触れたことをハードブロックにはしない。STDV は方向票を持たない(targetOnly=true / 0 票)ので、投影の健全性は valid ではなく projectionValid で持つ。Entry/SL/枚数/口座別上限/R119/AUTO/所有権/発注前検査は一切変えない。保有中の凍結済み TP/SL も変えない。検証は python tests/test_r121_ict_stdv.py / python replay_ict_stdv.py(読むだけ)。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
     "version": "R121-ICT-STDV-1",
     "schema": "NQX_ICT_STDV/1",
-    "_decisionNote": "2026-09-19: 初期導入は mode=SHADOW(アンカーと投影を記録するだけ。注文意図・Entry/SL/TP・decisionId は不変)、targets=OFF、participation=OFF。**SHADOW は損益改善の実証ではない。** LIVE 昇格は docs/R121_ICT_STDV.md §7 の受け入れ条件と逐次再生の結果が揃ってから。",
-    "mode": "SHADOW",
+    "_decisionNote": "2026-09-19 ユーザー決定: **STDV を利確目標の選択に使う部分を本番で有効にした(mode=LIVE / targets.mode=LIVE / ratios=[-1,-2,-2.5] / runnerEligible=false)。** 損益改善の実証とは分けた採用判断で、「10 セットアップ待ち」は必須条件にしていない。participation は**未実装**なので OFF のまま(LIVE と表示しない)。`-4` の runner 採用も含めない。初期導入(同日の SHADOW)からの差は mode と targets.mode の 2 語だけ。反映前の確認: (1) 実効リスク上限は口座別 RISK_=$200 / 2 枚固定 / SL 50pt を守る —— STDV は Entry/SL/枚数に触れないので |entry-stop| も riskDollars も変わらない(実測 12 周期で最大 SL 幅 31.25pt / $125)。ULTRA 経路でも枚数は runner 脚が支配するのでほぼ動かず(TP1 を 49.5 → 2.0pt にしても 10 → 12 枚)、上限は projected loss で判定するので効き続ける。(2) 目標は最終 decision と凍結プラン(tp1 / finalTarget / legs)まで届く。(3) TP が変われば decisionId も変わる(stdvIdentity が setup_identity へ入る)。(4) 保有建玉の SL/TP・R119・AUTO は不変(autotrade_engine / order.py は STDV を参照しない)。根拠と A/B/C 比較は docs/R121_ICT_STDV.md §11-12。戻すのは mode と targets.mode を OFF にする 2 語。",
+    "mode": "LIVE",
     "targets": {
-      "mode": "OFF",
+      "mode": "LIVE",
       "ratios": [-1.0, -2.0, -2.5],
       "runnerEligible": false
     },

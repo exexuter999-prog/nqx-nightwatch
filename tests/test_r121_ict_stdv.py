@@ -398,9 +398,14 @@ check("STDV は候補の score を動かさない(SHADOW と OFF の score 一�
 section("15. 契約の妥当性と実プロセス境界(通信・発注なし)")
 real = REAL_POLICY()
 check("本番契約の ictStdv は読めて、不正な段が無い", real["invalid"] == [], real)
-check("本番契約の既定は mode=SHADOW / targets=OFF / participation=OFF",
-      real["mode"] == "SHADOW" and real["targets"]["mode"] == "OFF"
-      and real["participation"]["mode"] == "OFF", real)
+# 2026-09-19 ユーザー決定: STDV を利確目標の選択に使う部分を本番で有効にした。
+# participation は**未実装**なので OFF 以外を許さない(LIVE と表示しない)。
+check("本番契約は mode=LIVE / targets=LIVE(2026-09-19 ユーザー承認)",
+      real["mode"] == "LIVE" and real["targets"]["mode"] == "LIVE", real)
+check("participation は未実装なので必ず OFF",
+      real["participation"]["mode"] == "OFF", real["participation"])
+check("targets.ratios は承認どおり [-1, -2, -2.5]",
+      real["targets"]["ratios"] == [-1.0, -2.0, -2.5], real["targets"])
 check("-4 は既定で目標に使わない(観測専用)",
       -4.0 not in (real["targets"].get("ratios") or []), real["targets"])
 check("runnerEligible は既定 false", real["targets"].get("runnerEligible") is False)

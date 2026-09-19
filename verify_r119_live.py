@@ -223,12 +223,22 @@ else:
     modes = (pol.get("mode"), (pol.get("targets") or {}).get("mode"),
              (pol.get("participation") or {}).get("mode"))
     print(f"   モード        = mode={modes[0]} / targets={modes[1]} / participation={modes[2]}")
-    if modes[0] in {"OFF", "SHADOW"} and modes[1] == "OFF" and modes[2] == "OFF":
-        ok(f"**判断を変えない構成**(mode={modes[0]} / targets=OFF / participation=OFF) "
-           "= 記録だけで損益に影響しない")
+    # 2026-09-19 ユーザー決定の構成。participation は**未実装**なので LIVE を許さない。
+    if modes[0] == "LIVE" and modes[1] == "LIVE":
+        ok("mode=LIVE / targets=LIVE(2026-09-19 ユーザー承認: STDV を利確目標の選択に使う)")
+    elif modes[0] in {"OFF", "SHADOW"} and modes[1] == "OFF":
+        print(f"   注意: STDV は判断に効かない構成(mode={modes[0]} / targets={modes[1]})。"
+              "2026-09-19 の承認は mode=LIVE / targets=LIVE。戻し済みならこれが正しい。")
     else:
-        print(f"   注意: 判断に影響する構成になっている(mode={modes[0]} / targets={modes[1]} / "
-              f"participation={modes[2]})。docs/R121_ICT_STDV.md §7 の受け入れ条件を確認する。")
+        fail(f"承認されていない組み合わせ(mode={modes[0]} / targets={modes[1]})")
+    if modes[2] == "OFF":
+        ok("participation=OFF(**未実装**。LIVE にしてはいけない)")
+    else:
+        fail(f"participation が OFF でない({modes[2]})。この段は未実装で LIVE と表示しない")
+    if (pol.get("targets") or {}).get("ratios") == [-1.0, -2.0, -2.5]:
+        ok("targets.ratios = [-1, -2, -2.5](承認どおり。-4 は含めない)")
+    else:
+        fail(f"targets.ratios が承認と違う: {(pol.get('targets') or {}).get('ratios')}")
     if info121["env"]:
         fail(f"環境変数で上書きされている疑い: {info121['env']}")
     else:

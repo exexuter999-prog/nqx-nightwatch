@@ -9,10 +9,12 @@
 **この文書は「実装が完成した」ことと「損益が改善した」ことを分けて書く。** §6 が実装、
 §7 が TURTLE 停止時の初回測定、§9 が未達、**§11 が TURTLE 復活後の A/B/C 比較と判断**。
 
-現行の設定(2026-09-19 時点):
-`ictStdv.mode = SHADOW` / `targets.mode = OFF` / `participation.mode = OFF`
-= **記録だけで注文判断を変えない**。`modelGate.disabled = []`(TURTLE 復活、ユーザー承認)。
-**TURTLE 復活は本番反映済み、STDV TARGETS は未採用。** 混ぜて扱わない(§11.5)。
+現行の設定(2026-09-19 時点。**§12 が最新**):
+`ictStdv.mode = LIVE` / `targets.mode = LIVE` / `targets.ratios = [-1,-2,-2.5]` /
+`runnerEligible = false` / `participation.mode = OFF`(**未実装**)。
+`modelGate.disabled = []`(TURTLE 復活)。
+**TURTLE 復活(§11)と STDV TARGETS の採用(§12)は別の判断**で、どちらもユーザー承認済み。
+§11.5 の「採用しない」は §12 で更新された。**損益改善の実証とは別の採用判断である。**
 
 ## 1. 採用仕様表(出典の規則 / Nightwatch 用に決めた規則)
 
@@ -345,3 +347,101 @@ TURTLE SELL Entry 29,728.75、STDV `−1` = 29,616.50 が TP1 になり梯子は
 * 次に `targets.mode=LIVE` を判断する最小の証拠: TURTLE 復活後の実運用で
   WATCH→ARMED 転換が **10 セットアップ以上**溜まり、その逐次 ΣR が費用控除後も
   プラスで、最大勝ちを除いても符号が変わらないこと。
+
+## 12. STDV TARGETS の本番投入(2026-09-19 ユーザー承認)
+
+**ユーザーが §11.5 の「採用しない」判断を更新し、本番投入を承認した。** 損益改善の実証とは
+分けた採用判断で、「10 セットアップ待ち」は必須条件にしていない。
+
+反映した設定(変更したのは **2 語**だけ):
+
+| キー | 変更前 | **変更後** |
+|---|---|---|
+| `ictStdv.mode` | SHADOW | **LIVE** |
+| `ictStdv.targets.mode` | OFF | **LIVE** |
+| `ictStdv.targets.ratios` | `[-1, -2, -2.5]` | 同じ(変更なし) |
+| `ictStdv.targets.runnerEligible` | false | 同じ(変更なし) |
+| `ictStdv.participation.mode` | OFF | 同じ(**未実装**。LIVE にしない) |
+| `modelGate.disabled` | `[]` | 同じ(TURTLE 復活を維持) |
+
+`-4` の runner 採用は含めない(`ratios` に `-4` を入れず `runnerEligible=false`)。
+
+### 12.1 反映前に確認した 4 点
+
+**(1) 実効リスク上限が 1 口座 $200 / 2 枚 / SL 50pt を守る**
+
+正本は口座別 `RISK_*`。7 口座すべて `RISK_=200` → 2 枚・$2/pt で **SL 上限 50pt**。契約の
+`defaultCapDollars $240` / `sl_cap_pt 60pt` より厳しい方が効く。
+
+STDV は **Entry / SL / 枚数に触れない**ので `|entry-stop|` も `riskDollars` も変わらない。
+実測(本番契約そのままで監査バンドル 1358 本):
+
+* TP が差し替わった 12 周期で **Entry/SL が変わったもの 0 件**
+* その 12 周期の SL 幅は最大 **31.25pt**($125)。**$200 / 50pt 超は 0 件**
+* 凍結プランで `riskCapSource=RISK_<口座>` / `riskCapDollars=200.0` / `qty=2` /
+  `riskPoints` は OFF と LIVE で**同一**
+
+ULTRA 経路は枚数を TP から逆算する(`required_qty_split`)ので理屈上は影響しうるが、
+`(tp1 + runner)` は **runner 脚が支配**するため実際にはほぼ動かない —— TARGET=$3,000 /
+runner 293pt の実例で TP1 を 49.5 → 2.0pt まで縮めても **10 → 12 枚**、想定損失
+$360 → $432 で、ULTRA エンベロープ($5,000)・残 DD($2,000)のどちらにも遠い。
+上限判定は `_contract_blockers` が **projected loss** で行うので TP に依らず効き続ける。
+加えて `MODEL_MIN_R = 1.5` が TP1 を近づけすぎる方向の床になっている
+(`targetR[0] < 1.5` は `TARGET_HEADROOM_INSUFFICIENT` で WATCH)。
+
+**(2) STDV の目標が最終 decision と凍結プランに反映される**
+
+`msnr_gate.evaluate` → `decision.targets` → scenario → `autotrade_engine.build_management_plan`
+を実際に通した(通信なし):
+
+| | decision.targets | plan.tp1 | plan.finalTarget | plan.legs |
+|---|---|---|---|---|
+| OFF | `[30200.0, 30400.0]` | 30200.0 | 30400.0 | TP1→30200 / RUNNER→30400 |
+| LIVE | `[30130.0, 30400.0]` | **30130.0** | 30400.0 | TP1→**30130** / RUNNER→30400 |
+
+本番契約そのままで 1358 バンドルを通すと、**最終 decision の TP が差し替わる周期は 12**
+(うち `ARMED/ACTIVE` **5**)。runner 却下は候補ごと 36 周期。
+
+**(3) TP 変更時に decisionId も変わる**
+
+`0f7122a45d13a5c4` → `2d97887b8df5b300`。凍結プランも新しい `decisionId` を持つ。
+差し替えが無い周期と OFF では `decisionId` は R121 以前とバイト一致
+(`stdvIdentity` が付かないため)。
+
+**(4) 保有建玉の SL/TP・R119・AUTO は変わらない**
+
+* `autotrade_engine.py` / `order.py` に STDV の識別子が 1 つも無い(試験で固定)。
+  凍結済みの TP/SL・建値移動・トレール・撤退は一切触らない
+* `limitGate`(R119)は `gapCap LIVE/1.5` / `targetPassed LIVE` のまま
+* `stopLogic` は `vwapClearance/marketStopGuard/poolClearance LIVE`・`flipOrigin OFF`・
+  `restingStopRecheck/sweepGate SHADOW` のまま
+* AUTO(`autotrade_arm`)は触っていない
+
+### 12.2 直した不整合
+
+* `_compact_stdv_audit` が `baseTargets` を「真値のときだけ」載せていたため、基準に梯子が
+  無かった周期(`[]`)がログで `None` に見え、「梯子が無かった」と「記録していない」を
+  区別できなかった。**差し替えた周期は空リストでも必ず残す**ように修正。
+* `verify_r119_live.py` §2b を、承認された構成(`mode=LIVE` / `targets=LIVE` /
+  `participation=OFF` / `ratios=[-1,-2,-2.5]`)を**検査する**形にした。`participation` が
+  OFF でなければ落ちる(この段は未実装なので LIVE と表示しない)。
+* `tests/test_r121_ict_stdv.py` の本番契約の固定値を承認後の値へ更新。
+
+### 12.3 参加判断(participation)の扱い
+
+**未実装。** 配線(`read_context` の出力と契約の段)だけあり、`participation.mode` は OFF
+固定で、`LIVE` と表示しない。`verify_r119_live.py` と試験の両方が OFF を要求する。
+到達済み目標や残り値幅を**参加判断へ使う実装は無い**。
+
+### 12.4 戻し方
+
+`execution_contract.json` の 2 語:
+
+```
+ictStdv.mode         : LIVE -> OFF(または SHADOW)
+ictStdv.targets.mode : LIVE -> OFF
+```
+
+両方 OFF にすると候補から `ictStdv` キーごと消え、出力は R121 以前とバイト一致する。
+`SHADOW` + `targets OFF` にすると記録だけ残る。TURTLE の復活は別の節(`modelGate.disabled`)
+なので、この 2 語では戻らない。Worker のデプロイは不要。
