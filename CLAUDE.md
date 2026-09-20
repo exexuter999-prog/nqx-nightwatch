@@ -158,7 +158,10 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   **完全に適格な**候補を隠す」欠陥の修正で、選べるのは `hardBlockers` ゼロの候補だけ。
   市場全体・口座全体の停止(ボラ床・イベント窓・限月・取得受領書・手動 HALT・AUTO・
   建玉照会)は primary を選んだ**後**に当たるので迂回できない。費用込みで滑り 0/1/2 tick の
-  どれでも +2.0〜+2.1R・最大 DD 不変だが、セットアップ単位の優位は未確定(P=0.73)。
+  どれでも ΣR は悪化せず(+2.0〜+2.1R)最大 DD も不変。**ただし損益の根拠は 1 トレード
+  依存**(+2.62R を除くと −0.56R)で、decisionId 単位の区間は 0 を跨ぐ(P=0.69)。
+  全体停止(ボラ床・イベント窓・限月・取得受領書・手動 HALT・AUTO・建玉照会)は
+  7 条件 × reconcile 実行で**注文 0 件**を確認(tests/test_r122_global_stop_no_order.py)。
   浅い代替候補は逐次再生で悪化したため(ΣR +7.71 → +6.71、区間 [−0.08,−0.02])SHADOW。記憶は
   `.secrets/structure_context_state.json`(発注台帳とは別)。検証は
   `python verify_r122_live.py` / `python tests/test_r122_structure_context.py` /

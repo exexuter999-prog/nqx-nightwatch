@@ -333,28 +333,42 @@ def simulate(side: str, entry: float, stop: float, targets: List[float], bars: L
     times = times if times is not None else [bar["t"] for bar in bars]
     fill = None
     fill_px = entry
+    # R122 レビュー(2026-09-20): 約定しなかった結果にも**注文を出したか**と**枠が空く時刻**を
+    # 付ける。逐次再生が「指値を置いて待っている間」を占有として数えられるようにするため。
+    # 既存キー(outcome / r / tp1 / fillT / exitT / clearancePt)は変えていないので、
+    # 既存の再生(R90 / R103 / R121 / R119)の数字は 1 つも動かない。
     if market_price is not None:
         index = bisect.bisect_right(times, start) - 1
         if index < 0 or start - bars[index]["t"] >= 180:
-            return {"outcome": "NO_BARS"}
+            return {"outcome": "NO_BARS", "attempted": False, "cancelT": None}
         fill, fill_px = index, float(market_price)
     else:
         first = bisect.bisect_right(times, start)
         if first >= len(bars) or bars[first]["t"] - start > 600:
-            return {"outcome": "NO_BARS"}             # 公開直後の足が無い = 判定材料が無い
+            # 公開直後の足が無い = 判定材料が無い(注文を出したとも言えない)
+            return {"outcome": "NO_BARS", "attempted": False, "cancelT": None}
         for index in range(first, len(bars)):
             bar = bars[index]
             if bar["t"] - start > rest_sec:
-                return {"outcome": "NO_FILL"}
+                # 指値は置かれたまま rest_sec で取消(R52 / R103-3 の resting 再検査)。
+                return {"outcome": "NO_FILL", "attempted": True,
+                        "cancelT": start + rest_sec, "cancelReason": "REST_EXPIRED"}
             if index > first and bar["t"] - bars[index - 1]["t"] > 65 * 60:
-                return {"outcome": "NO_BARS"}         # 取得の欠落(CME の 1 時間休場は除く)
+                # 取得の欠落(CME の 1 時間休場は除く)。指値は置かれていた。
+                return {"outcome": "NO_BARS", "attempted": True,
+                        "cancelT": start + rest_sec, "cancelReason": "BARS_MISSING"}
             if (bar["l"] <= entry - trade_through) if long_side else (bar["h"] >= entry + trade_through):
                 fill = index
                 break
             if (bar["h"] >= tp1) if long_side else (bar["l"] <= tp1):
-                return {"outcome": "TP1_FIRST"}
+                # R52: 未約定のまま TP1 へ届いたら取消。engine が気付けるのは**その足が
+                # 閉じた後**なので、枠が空くのは足の close 時刻。
+                return {"outcome": "TP1_FIRST", "attempted": True,
+                        "cancelT": min(bar["t"] + 180, start + rest_sec),
+                        "cancelReason": "TP1_REACHED"}
         if fill is None:
-            return {"outcome": "NO_BARS"}
+            return {"outcome": "NO_BARS", "attempted": True,
+                    "cancelT": start + rest_sec, "cancelReason": "BARS_EXHAUSTED"}
     t0 = bars[fill]["t"]
     runner_stop, tp1_done, legs, worst, last = stop, False, [], None, bars[fill]
     for index in range(fill, len(bars)):
@@ -385,7 +399,8 @@ def simulate(side: str, entry: float, stop: float, targets: List[float], bars: L
     clearance = None if worst is None else ((worst - stop) if long_side else (stop - worst))
     # fillT / exitT は R90 の逐次再生(1 ポジションずつ)が使う。約定足と最後に見た足の時刻。
     return {"outcome": "FILLED", "r": points / risk, "points": points, "tp1": tp1_done,
-            "clearancePt": clearance, "fillT": bars[fill]["t"], "exitT": last["t"]}
+            "clearancePt": clearance, "fillT": bars[fill]["t"], "exitT": last["t"],
+            "attempted": True, "cancelT": None}
 
 
 def load_setups(secrets: str = SECRETS) -> List[Dict[str, Any]]:
