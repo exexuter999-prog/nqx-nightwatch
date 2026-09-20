@@ -622,6 +622,54 @@ def test_selection_stage():
           shadow["model"] == BREAKER and "SHADOW" in shadow["structure"]["selectionReason"], shadow)
 
 
+def test_selection_only_picks_fully_qualified_candidates():
+    """選択層が選べるのは **既存ゲートを全部通った候補だけ**(`allowed`)。"""
+    blocked_a = cand(model=BREAKER, blockers=["ANCHOR_CONSUMED"])
+    blocked_a["grade"], blocked_a["score"] = "A+", 10
+    blocked_b = cand(model=TURTLE, blockers=["RISK_CAP_EXCEEDED"])
+    blocked_b["grade"], blocked_b["score"] = "A", 8
+    on = msnr_gate.select_primary([blocked_a, blocked_b], {}, context=ctx_alive(),
+                                  structure_policy=policy(selection="LIVE"))
+    check("武装できる候補が 1 つも無ければ、selection LIVE でも並びは変わらない",
+          on["model"] == BREAKER and on["state"] == "WATCH"
+          and on["structure"]["selectionReason"] == "GRADE_SCORE_R_MODELRANK", on)
+    armed = cand(model="VP80_REVERSION")
+    armed["grade"], armed["score"] = "B", 1
+    picked = msnr_gate.select_primary([blocked_a, blocked_b, armed], {}, context=ctx_alive(),
+                                      structure_policy=policy(selection="LIVE"))
+    check("selection LIVE が選ぶのは hardBlockers ゼロの候補だけ",
+          picked["model"] == "VP80_REVERSION" and not picked["hardBlockers"]
+          and picked["state"] == "ARMED", picked)
+
+
+def test_selection_cannot_bypass_global_gates():
+    """市場全体・口座全体の停止は primary を選んだ**後**に当たるので迂回できない。"""
+    import monitor_publish
+    armed = {"model": "VP80_REVERSION", "side": "BUY", "state": "ARMED", "grade": "B",
+             "entry": 30000.0, "stop": 29980.0, "target": 30040.0}
+    demoted, note = monitor_publish.apply_volatility_grade_gate(
+        armed, {"active": True, "ratio_all": 0.99, "noise": 59.0})
+    check("ボラ床の停止は、どのモデルが primary でも ARMED を WATCH へ落とす",
+          demoted["state"] == "WATCH" and note, (demoted.get("state"), note))
+    for model in ("BREAKER_CONTINUATION", "TURTLE_SOUP_REVERSAL", "OTE_FVG_PULLBACK"):
+        other, _n = monitor_publish.apply_volatility_grade_gate(
+            {**armed, "model": model}, {"active": True, "ratio_all": 0.99, "noise": 59.0})
+        check(f"ボラ床の停止はモデルを見ない({model})", other["state"] == "WATCH", other)
+    # 構造: publish_state はイベント窓・限月・ボラを `chosen`(= 選ばれた後)へ当てる。
+    src = io.open(os.path.join(BASE, "monitor_publish.py"), encoding="utf-8").read()
+    body = src[src.index("def publish_state("):]
+    body = body[:body.index("\ndef ", 10)]
+    for token in ("event blackout", "contract expiry gate", "apply_volatility_grade_gate"):
+        check(f"publish_state は選択後の scenario へ {token} を当てる", token in body)
+    check("publish_state は primary を選び直さない(select_primary を呼ばない)",
+          "select_primary" not in body)
+    # データゲートも同じく evaluate の後。
+    enrich = src[src.index("def enrich_decisive_strategy("):]
+    enrich = enrich[:enrich.index("\ndef ", 10)]
+    check("取得受領書のゲートは evaluate の後に decision へ当たる",
+          enrich.index("acquisition_display_gate") > enrich.index("msnr_gate.evaluate"))
+
+
 # --------------------------------- 8. decision → 凍結プラン → カード縮小 → 保存
 
 def test_decision_carries_minimal_fields():
@@ -847,6 +895,27 @@ def _code_without_docstrings(path):
             if doc:
                 src = src.replace(doc, "")
     return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+
+
+def test_production_never_reconstructs_15m():
+    """本番は**直接取得した 15 分足だけ**を親にする。3 分足からの再構成は研究用。"""
+    src = _code_without_docstrings(os.path.join(BASE, "market_structure_context.py"))
+    check("market_structure_context は bars3m を読まない", "bars3m" not in src)
+    check("親の出所は snapshot.bars15m だけ",
+          src.count('get("bars15m")') >= 1 and "reconstruct" not in src.lower(), None)
+    # 再構成は再生専用モジュールにだけある。
+    replay = io.open(os.path.join(BASE, "replay_structure_context.py"), encoding="utf-8").read()
+    check("再構成は replay_structure_context にだけある", "def reconstruct_15m(" in replay)
+    for name in ("monitor_publish.py", "monitor_pipeline.py", "tv_snapshot.py",
+                 "autotrade_engine.py", "order.py", "msnr_gate.py"):
+        body = io.open(os.path.join(BASE, name), encoding="utf-8").read()
+        check(f"{name} は 15 分足を再構成しない", "reconstruct_15m" not in body)
+    check("再生は再構成を『研究用』と明示する", "研究用" in replay)
+    # 直接取得の 15 分足が無い周期は、推測で作らず親を HTF 要約へ落とす。
+    ctx = context_of(bundle(spec3m=RESTING, bars15=None,
+                            htf={"status": "MIXED", "bias": None, "valid": False, "frames": {}}))
+    check("15 分足が無ければ理由を残して親を作らない(3 分足で代用しない)",
+          "BARS15M_MISSING" in (ctx.get("reasons") or []), ctx.get("reasons"))
 
 
 def test_pure_functions_have_no_side_effects():

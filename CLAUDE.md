@@ -146,14 +146,20 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   確定足要約)へ落ちる。**3 分足から上位足を合成しない。** 親子関係は `CONTINUATION` /
   `PULLBACK` / `REVERSAL_CANDIDATE` / `UNRESOLVED` で、親 BUY・子 SELL を「矛盾だから不成立」に
   しない。段は 5 つ独立: `context`(**LIVE**)/ `participation`(**LIVE**)/ `shallowCandidate`
-  (**SHADOW**)/ `selection`(**OFF**)/ `nearTerm`(**SHADOW**。未校正なので LIVE にできない)。
+  (**SHADOW**)/ `selection`(**LIVE**。2026-09-20 採用。`docs/R122_SELECTION_STAGE.md`)/
+  `nearTerm`(**SHADOW**。未校正どころか「常に NEUTRAL」の基準に負けるので LIVE にできない)。
   参加状態(`ENTRY_READY` / `WAIT_FOR_PULLBACK` / `WAIT_FOR_CONFIRMATION` / `NO_ROOM` /
   `INVALIDATED` / `EXPIRED` / `CONTEXT_UNAVAILABLE`)と根拠 ID は `decision.structure` と凍結
   プランに残る(カード縮小でも落とさない)。**この層が足すブロッカーは `PARENT_THESIS_INVALIDATED`
   の 1 つだけで、親と同じ方向の候補にしか掛からない** —— 逆方向の独立したセットアップは止めない。
   保有建玉の管理(engine / order.py)は R122 を一切参照しない。監査 1,359 本で**全段 OFF は
-  R122 以前とバイト一致**、本番構成でも**注文意図の変化 0**。浅い代替候補は逐次再生で悪化した
-  ため(ΣR +7.71 → +6.71、区間 [−0.08,−0.02])SHADOW に留めている。記憶は
+  R122 以前とバイト一致**。本番構成との差は**選択層の 15 周期だけ**(1,359 本中 1,344 本は
+  注文意図まで一致)。選択層は「候補固有の理由で WATCH の高得点候補が、同じ周期の
+  **完全に適格な**候補を隠す」欠陥の修正で、選べるのは `hardBlockers` ゼロの候補だけ。
+  市場全体・口座全体の停止(ボラ床・イベント窓・限月・取得受領書・手動 HALT・AUTO・
+  建玉照会)は primary を選んだ**後**に当たるので迂回できない。費用込みで滑り 0/1/2 tick の
+  どれでも +2.0〜+2.1R・最大 DD 不変だが、セットアップ単位の優位は未確定(P=0.73)。
+  浅い代替候補は逐次再生で悪化したため(ΣR +7.71 → +6.71、区間 [−0.08,−0.02])SHADOW。記憶は
   `.secrets/structure_context_state.json`(発注台帳とは別)。検証は
   `python verify_r122_live.py` / `python tests/test_r122_structure_context.py` /
   `python replay_structure_context.py --replay [--bars15m]`(読むだけ)。戻しは各段の `mode` を

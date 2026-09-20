@@ -34,7 +34,7 @@ problems: list[str] = []
 
 #: 期待する本番構成。ここを変えるときは docs/R122_… §8 の根拠も一緒に更新する。
 EXPECT_MODES = {"context": "LIVE", "participation": "LIVE", "shallowCandidate": "SHADOW",
-                "selection": "OFF", "nearTerm": "SHADOW"}
+                "selection": "LIVE", "nearTerm": "SHADOW"}
 #: **LIVE にしてはいけない段**(未校正の予測を武装ゲートにしない)。
 NO_LIVE = ("nearTerm",)
 
@@ -367,5 +367,5 @@ if problems:
         print(f"  - {text}")
     raise SystemExit(1)
 print("R122 は本番構成へ反映済み(context=LIVE / participation=LIVE / "
-      "shallowCandidate=SHADOW / selection=OFF / nearTerm=SHADOW)")
+      "shallowCandidate=SHADOW / selection=LIVE / nearTerm=SHADOW)")
 raise SystemExit(0)

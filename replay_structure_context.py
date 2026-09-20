@@ -24,6 +24,12 @@ bars15m.json`(最後の実取得。`CME_MINI:MNQ1!`)から、**各バンドル�
 だけ**を `snapshot.bars15m` へ入れる。この 15 分足がバンドル自身の 3 分足と同じ価格系列で
 あることは毎回ハッシュではなく**値で**検算する(`verify_bars15m`)。合成ではない。
 
+``--source recon``: **研究用**。監査バンドル自身の確定 3 分足から 15 分足を組み直して窓を
+広げる。直接取得分と重なる範囲でしか正しさを確かめられない(重なりは 50 窓)ので、
+**全期間の同一性は保証されない**。本番の親の出所は直接取得した `snapshot.bars15m` だけで、
+この経路は本番コードには存在しない(`market_structure_context` は 3 分足から 15 分足を
+作らない。`tests/test_r122_structure_context.py::test_production_never_reconstructs_15m`)。
+
 ネットワーク・台帳への書き込み・発注には触れない。
 """
 from __future__ import annotations
@@ -893,6 +899,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                    if any(abs(by_t[b["t"]][k] - b[k]) > 1e-9 for k in ("o", "h", "l", "c"))]
             print(f"直接取得との検算: 重なり {len(common)} 本 / 不一致 {len(bad)} 本"
                   f" → {'同一(使う)' if common and not bad else '**使えない**'}")
+            print("*" * 78)
+            print("* 再構成 15 分足は **研究用** です。")
+            print("*  - 直接取得と一致を確認できたのは重なった "
+                  f"{len(common)} 窓だけで、これは全期間("
+                  f"{len(bars15)} 本)の同一性の証明ではありません。")
+            print("*  - 本番の親の出所は **直接取得した snapshot.bars15m だけ** です"
+                  "(市場再開後は compact で残るので毎周期届きます)。")
+            print("*  - この再生の数字を、直接取得だけで測った数字と同列に並べないこと。")
+            print("*" * 78)
             if not common or bad:
                 return 2
             tag = "_recon"
