@@ -192,10 +192,7 @@ VP80 SELL(A)1 / BREAKER BUY 1。**うち 13/15 は建てる方向が反転する
    `test_selection_only_picks_fully_qualified_candidates` が、武装できる候補が無ければ
    並びが一切変わらないことを検査する。
 2. **GLOBAL の停止は迂回できない**。§2.1 のコード位置に加えて、
-   `tests/test_r122_global_stop_no_order.py` が **7 つの停止条件それぞれで
-   `autotrade_engine.reconcile` を実際に通し、`order.py` の呼び出しが 0 件**であることを
-   数える(別の適格候補が存在し、selection LIVE がそれを primary にしている入力で)。
-   同じ harness で停止条件を外すと `--confirm` 付きの送信が実際に出る(陽性対照)。
+   `tests/test_r122_global_stop_no_order.py` が実測する(§6 に検証範囲)。
 3. 変わるのは 1,358 周期中 **15 周期だけ**(34 日で発注 +4 件 = 1 週あたり 1 件弱)。
 4. 費用込みで**どの滑り条件でも ΣR は悪化しない**(+2.13 / +2.06 / +2.00R)、
    **最大 DD は不変**。
@@ -228,7 +225,7 @@ primary が入れ替わった周期。`changedFromBaseline` にも差分が残�
 | 武装前の初出時刻で占有を判定 | `order_attempts()` が **ARMED の周期だけ**を集め、枠が空いた時点で最も早い適格周期を採る | `test_armed_time_not_first_seen` / `test_busy_blocks_only_while_occupied` |
 | TP1 先着の取消まで枠を占有しない | `entry_depth.simulate` が `attempted` / `cancelT` / `cancelReason` を返し、`sequential` が `cancelT` まで busy を進める | `test_resting_order_holds_the_slot` / `test_rest_expiry_holds_the_slot` / `test_simulate_returns_cancel_timing` |
 | WATCH 時の TP を後の ARMED 取引へ流用 | 束ねを **`decisionId`** にし、凍結するのはその周期の Entry/SL/TP | `test_frozen_targets_come_from_the_armed_cycle` / `test_decision_id_is_the_dedupe_key` |
-| 全体停止の「送信 0」を実行検証していない | 7 条件 × `reconcile` 実行 + 陽性対照 + 通信遮断 | `tests/test_r122_global_stop_no_order.py` |
+| 全体停止の「送信 0」を実行検証していない | 停止条件を**入力として与え**、本番の判定処理による降格から `reconcile` の注文 0 件まで通す。OFF/SHADOW/LIVE とも候補選択からやり直す。陽性対照と通信遮断つき | `tests/test_r122_global_stop_no_order.py`(§6) |
 
 **共通ヘルパは変えていない。** `replay_stop_logic.setups_for` / `simulate_setup` は
 R90 / R103 / R119 / R121 の公表済みの数字がそこに乗っているのでそのままにし、修正は
@@ -243,3 +240,61 @@ R90 / R103 / R119 / R121 の公表済みの数字がそこに乗っているの�
   追加 3 件は**全部負け**(−3.25R)、decisionId 単位 −0.030R/件 P(improve)=0.24。
   **SHADOW のままにする判断は修正後も変わらない**(むしろ強まった)。
 * E(選択層)はこの文書の §3 が正本。
+
+
+---
+
+## 6. 全体停止の統合試験(`tests/test_r122_global_stop_no_order.py`)
+
+**入力**: 実サイクル 2026-09-18 15:26Z(監査バンドル `monitor_cycle_0028`)の確定 3 分足 60 本・
+レベル 12 本・価格・HTF 文脈・取得受領書を `tests/fixtures_r122_cycle.json` に切り出したもの。
+価格系列は一切加工していない。時刻もずらしていない —— ずらすと ET の時間帯が変わって
+killzone の確認要素が動き、候補集合が変わってしまうため(実測: 03:31 ET へ移すと
+TURTLE SELL が `NO_CONFIRMATION` で武装しなくなった)。代わりに価格の鮮度窓を
+`NQX_MARKET_MAX_AGE_SEC`(本番と同じ環境変数)で広げ、engine には `now = fixture の at` を渡す。
+
+**経路**(手作業で `state: WATCH` を書かない):
+
+```
+fixture → monitor_publish.enrich_decisive_strategy   (候補生成 → primary 選択)
+        → monitor_publish.publish_state              (イベント窓 / 限月 / ボラ の降格はここ)
+        → bundle["_published_scenario"]
+        → autotrade_engine.reconcile                 (order.py の呼び出しを数える)
+```
+
+**スタブは外部 I/O だけ**: Cloudflare(`nqx_state.load_cloud_env / _read_kv_env /
+publish_cycle / publish_accounts` と claim)、ブローカー照会、`runner`(= order.py の起動点)、
+イベント表の**パス**(`events.CACHE` / `events.MANUAL`)、台帳とロックの一時ディレクトリ。
+`socket` / `subprocess` は audit hook で遮断(到達 0 件)。
+
+**停止条件は入力・設定として与え、判定は本物**:
+
+| 条件 | 与え方 | 判定する本番コード |
+|---|---|---|
+| ボラ床スタンドダウン | 実測比率(≈0.29)に対し `NQX_VOL_GATE_STANDDOWN` を 0.20 へ | `monitor_publish.vol_gate` / `apply_volatility_grade_gate` |
+| High イベント窓 | 手動イベント表に High を 1 件(実時計の窓内) | `events.current_gate` / `active_blackout` → `publish_state` |
+| 限月の満期ガード | 契約の時計を満期の 1 日前へ | `contract.entry_allowed` → `publish_state` |
+| 取得受領書なし | bundle から `acquisitionReceipt` を落とす | `monitor_publish.acquisition_display_gate` |
+| 手動 HALT | `execution_contract.CONTRACT["manualHalt"]["autotrade"]` | `autotrade_engine.manual_halt_source` |
+| AUTO OFF | cfg `NQX_AUTOTRADE=0` | `autotrade_engine.autotrade_enabled` |
+| 建玉照会 UNVERIFIED | 注入した照会が `verified:false` | `autotrade_engine` の照会検査 |
+
+**この入力で実際に確認できたこと**(53 件の assert):
+
+* 入力の性質: OFF は `BREAKER_CONTINUATION BUY A WATCH`(`ANCHOR_CONSUMED`)、
+  **LIVE は `TURTLE_SOUP_REVERSAL SELL B ARMED`** を primary にする。SHADOW は OFF と同じ
+  候補を選び、観測だけ残す。= 「別の適格候補が存在し、選択層がそれを選んでいる」入力。
+* **7 条件 × 3 モード(OFF / SHADOW / LIVE)すべてで注文 0 件。**
+* ボラ床・イベント窓・限月・取得受領書の 4 条件は、**LIVE で ARMED だった scenario が
+  本番の判定処理によって WATCH へ降格し**、その理由(`vol gate stand-down` /
+  `event blackout` / `contract expiry gate`)が注記に残ることまで確認した。
+* 手動 HALT は 3 モードとも `MANUAL HALT` の注記つきで停止。建玉照会 UNVERIFIED は
+  `broker position is UNVERIFIED`。AUTO OFF は新規 ENTRY を評価から外す(注記なし)。
+* **陽性対照**: 停止条件を全部外すと、LIVE は実際に `--confirm` 付きの `--split-tp` 送信を
+  出す(公開 scenario は ARMED)。OFF は武装していないので 0 件 —— 現行の振る舞いそのもの。
+
+**この試験で確認できていないこと**: この入力では OFF / SHADOW の primary が元から
+WATCH(`ANCHOR_CONSUMED`)なので、ボラ床・イベント窓・限月・取得受領書の 4 条件について
+**OFF / SHADOW では「降格の対象が無い」**(試験は INFO として明示する)。降格そのものを
+実行検証できているのは LIVE のケースである。停止条件が掛かったときに注文が 0 件になることは
+3 モードとも確認できている。
