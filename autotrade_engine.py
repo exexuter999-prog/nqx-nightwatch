@@ -19,12 +19,14 @@ runnerだけを建値→一方向トレールへ変更する。片脚の送信�
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import inspect
 import json
 import math
 import os
 import statistics
 import subprocess
+import threading
 import sys
 import time
 from datetime import datetime, time as dt_time, timezone, timedelta
@@ -99,6 +101,89 @@ def _setting(name: str, cfg: Optional[Dict[str, str]] = None, default: Any = Non
     if cfg and name in cfg:
         return cfg[name]
     return default
+
+
+@contextlib.contextmanager
+def _live_broker_reads():
+    """R114: この中の照会は共有読み取りを使わない。broker_status が無ければ素通し。"""
+    try:
+        import broker_status
+        manager = broker_status.live_reads()
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    with manager:
+        yield
+
+
+def _claim_scope_all_flat(claim_view: Any, symbol: str) -> bool:
+    """claim の accountScope **全口座** が verified FLAT で、blocking 注文が無いか(R116)。
+
+    DO の RECOVER 証明は「1 回の観測で全 receipt を照合」する設計で、多口座 claim は
+    1 口座の観測に他 6 口座の注文が載らないため **構造的に通らない**(常に
+    ENTRY_CLAIM_RECOVERY_UNVERIFIED)。一方 DO の stale release は 1 口座の観測から
+    `staleReleasable` を出すので、多口座では「A が空 = 全部空」にはならない。
+    engine は全口座を観測しているので、ここで全口座の不在を確かめてから CLAIM へ委ねる。
+    読むのはサイクル先頭の共有観測(R114)なので追加の照会は出ない。
+    1 口座でも verified でない / 建玉あり / blocking 注文ありなら False(推測しない)。
+    """
+    intent = claim_view.get("executionIntent") if isinstance(claim_view, dict) else None
+    scope = [str(value).strip() for value in ((intent or {}).get("accountScope") or [])
+             if str(value or "").strip()]
+    if not scope:
+        return False
+    try:
+        import broker_status
+        # 「生きた注文が無い」は DO の staleEntryClaimReleasable と同じ規則で判定する:
+        # 注文行の status が全部 terminal、かつ activeOrders / openCount がゼロ。
+        # blockingOrderStates は engine の注文ストリームの語彙(ENTRY_RESTING 等)であって
+        # ブローカー行の status(WORKING 等)ではないので、行の側で見る。
+        blocking = set(execution_contract.CONTRACT["blockingOrderStates"])
+        terminal = set(execution_contract.CONTRACT["brokerObservation"]["terminalStates"])
+        for account in scope:
+            position = broker_status.query_position_cached(symbol, account=account)
+            if (not isinstance(position, dict) or position.get("verified") is not True
+                    or int(position.get("qty") or 0) != 0):
+                return False
+            orders = broker_status.query_orders_cached(symbol, account=account)
+            if not isinstance(orders, dict) or orders.get("verified") is not True:
+                return False
+            if str(orders.get("state") or "NONE").upper() in blocking:
+                return False
+            rows = [row for row in (orders.get("orders") or []) if isinstance(row, dict)]
+            if any(str(row.get("status") or "").upper() not in terminal for row in rows):
+                return False
+            if (orders.get("activeOrders") or []) or int(orders.get("openCount") or 0) != 0:
+                return False
+    except Exception:  # noqa: BLE001 — 観測できなければ不在とは言わない
+        return False
+    return True
+
+
+def _route_rows_for_account(rows, account) -> List[Dict[str, Any]]:
+    """凍結 route snapshot の行を **照会する口座** で絞る(R115, 2026-09-19)。
+
+    routeSnapshot は scope の全口座の行(行ごとに `accountId`)を持つ。ここを絞らずに
+    全口座の注文 ID を 1 口座の照会へ渡すと、アダプタが他口座の注文行を
+    `crosstrade order row account is outside configured scope` で正しく弾き、
+    **全口座が UNVERIFIED** になる。1 口座では起きない多口座固有の穴で、
+    2026-09-19 01:50 の 7 口座 ENTRY が送信後照合で HALT し、以後の全サイクルと
+    RECOVER がここで止まっていた。
+
+    `account` が空(単一口座の旧経路で建玉に accountId が無い)なら従来どおり全行。
+    `accountId` を持たない旧い行は残す(単一口座時代の台帳)。
+    """
+    if not account:
+        return [row for row in (rows or []) if isinstance(row, dict)]
+    wanted = str(account)
+    kept = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        owner = str(row.get("accountId") or row.get("account") or "")
+        if not owner or owner == wanted:
+            kept.append(row)
+    return kept
 
 
 def _query_orders_with_ids(query, symbol: str, known_order_ids=None):
@@ -483,13 +568,19 @@ def _read_ledger(path: str = LEDGER_FILE) -> Tuple[List[Dict[str, Any]], Optiona
     return records, None
 
 
+#: R118: 台帳の追記を直列化する。口座を並行で回す周期(Coordinator)では、
+#: 同じプロセスの別スレッドが同時に追記しうる。1 行が混ざると台帳が壊れ、
+#: CLAUDE.md §5 の「台帳が壊れたら HALT」に落ちる。
+_LEDGER_WRITE_LOCK = threading.Lock()
+
+
 def _append_ledger(record: Dict[str, Any], path: str = LEDGER_FILE) -> None:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     payload = dict(record)
     payload.setdefault("time", _iso_now())
-    with open(path, "a", encoding="utf-8") as fh:
+    with _LEDGER_WRITE_LOCK, open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
@@ -635,10 +726,14 @@ def _stable_broker_snapshot(position_query, order_query, symbol, frozen_ids,
     import nqx_state
     max_skew = float(execution_contract.CONTRACT["brokerObservation"]["maxComponentSkewSec"])
     triple = None
+    # R114: 三点読みは「二度読んで同じ」ことが DO への不在証明になる。共有読み取りに
+    # 当たると before/after が同じオブジェクトになり証明が偽物になるので、ここは
+    # 必ずブローカーへ行く(injected な fake query には影響しない)。
     for _ in range(max(1, attempts)):
-        before = position_query(symbol)
-        orders = _query_orders_with_ids(order_query, symbol, frozen_ids)
-        after = position_query(symbol)
+        with _live_broker_reads():
+            before = position_query(symbol)
+            orders = _query_orders_with_ids(order_query, symbol, frozen_ids)
+            after = position_query(symbol)
         triple = (before, orders, after)
         orders_at = nqx_state._iso_ms(str((orders or {}).get("observedAt") or ""))
         after_at = nqx_state._iso_ms(str((after or {}).get("observedAt") or ""))
@@ -657,11 +752,81 @@ def _claim_recovery_symbol(claim_view: Any, current_symbol: str) -> str:
     return str(current_symbol)
 
 
+#: R69 と同じ窓。口座名簿がこの秒数より古ければ「消えた」証明に使わない。
+VANISHED_SCOPE_ROSTER_MAX_AGE_SEC = 900
+
+
+def _claim_scope_vanished_from_broker(view: Any, claim_view: Any,
+                                      now: Optional[datetime] = None) -> bool:
+    """claim の accountScope が **ブローカーの口座名簿から消えている**か。
+
+    Worker の ``claimScopeVanishedFromBroker``(cloudflare/src/state_machine.js、R69)を
+    そのまま写したもの。**判定条件を勝手に緩めないこと** —— 片方だけ緩むと、
+    engine が「解放してよい」と思った claim を DO が握り続ける食い違いになる。
+
+    なぜ engine 側にも要るか(2026-09-18): 口座が消えると、その口座への建玉・注文照会は
+    永久に ``verified=false`` を返す(``requested crosstrade account is outside configured
+    scope`` / HTTP 400)。すると ``_recover_entry_from_current_broker`` は必ず
+    ``ENTRY_RECOVERY_CURRENT_BROKER_PROOF_INVALID`` で落ち、下の ``deferrable`` は
+    ``ENTRY_CLAIM_RECOVERY_UNVERIFIED`` しか見ていないため **CLAIM へ到達する前に
+    blocked を返していた**。DO には R69 の stale release(消えた scope を名簿で
+    不在証明にする)が既にあるのに、そこへ一度も辿り着けない。R40 / R53 が
+    「終端証明を構造的に作れない経路は DO へ委ねる」と決めたのと同じ形の穴で、
+    2026-09-18 の口座入替(funded LFF…0006 が消滅 → 評価 7 口座)で実際に踏んだ:
+    09-17 06:13 の claim が CONSUMED のまま残り、毎周期
+    ``autotrade blocked: ENTRY startup recovery failed`` で新規が全部止まった。
+
+    ここで True を返しても **engine は何も解放しない**。CLAIM まで進むだけで、
+    解放してよいかは DO が自分の state(名簿の verified・鮮度・claim の年齢)で
+    再検証する。名簿が無い・古い・未検証なら推測せず False。
+    """
+    scope = []
+    intent = claim_view.get("executionIntent") if isinstance(claim_view, dict) else None
+    if isinstance(intent, dict) and isinstance(intent.get("accountScope"), list):
+        scope = [str(value) for value in intent["accountScope"] if str(value or "").strip()]
+    if not scope:
+        return False
+    roster = view.get("accounts") if isinstance(view, dict) else None
+    sync = roster.get("sync") if isinstance(roster, dict) else None
+    if not isinstance(roster, dict) or not isinstance(sync, dict) or sync.get("verified") is not True:
+        return False
+    raw = sync.get("observedAt") or roster.get("observedAt")
+    try:
+        observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    age = ((now or datetime.now(timezone.utc)) - observed).total_seconds()
+    if age < -60 or age > VANISHED_SCOPE_ROSTER_MAX_AGE_SEC:
+        return False
+    configured = {str(row.get("id")) for row in (roster.get("list") or [])
+                  if isinstance(row, dict) and row.get("id")}
+    missing = {str(value) for value in (sync.get("missing") or [])}
+    broker_only = {str(value) for value in (sync.get("unknown") or [])}
+
+    def present_at_broker(account_id: str) -> bool:
+        return (account_id in configured and account_id not in missing) or account_id in broker_only
+
+    return all(not present_at_broker(account_id) for account_id in scope)
+
+
 def _recover_entry_from_current_broker(claim, journal, position_query,
                                        order_query, symbol):
     """Production R22 startup recovery using a fresh stable broker snapshot."""
     import nqx_state
-    frozen = claim.get("routeSnapshot") if isinstance(claim.get("routeSnapshot"), list) else []
+    frozen_all = claim.get("routeSnapshot") if isinstance(claim.get("routeSnapshot"), list) else []
+    # R115: position_query はこの口座に束縛されている。多口座 claim の routeSnapshot から
+    # **この口座の行だけ**で不在証明を組む。他口座の ID を混ぜるとアダプタが scope 外として
+    # 弾き、回復が永久に ENTRY_RECOVERY_CURRENT_BROKER_PROOF_INVALID になる。
+    # 観測口座は建玉照会の accountId で知る(共有読み取りなので追加コストはほぼ無い)。
+    try:
+        probe = position_query(symbol)
+    except Exception:  # noqa: BLE001 — 観測できなければ下の照会で従来どおり落ちる
+        probe = None
+    probe_account = (str(probe.get("accountId") or probe.get("account") or "")
+                     if isinstance(probe, dict) else "")
+    frozen = _route_rows_for_account(frozen_all, probe_account)
     frozen_ids = sorted(str(row.get("orderId")) for row in frozen
                         if isinstance(row, dict) and row.get("state") == "ACCEPTED"
                         and row.get("orderId"))
@@ -1380,6 +1545,16 @@ def _run_order(args: List[str], confirm: bool) -> Tuple[int, str]:
     command = [sys.executable, os.path.join(BASE, "order.py")] + list(args)
     if confirm:
         command.append("--confirm")
+    # R113(2026-09-19): 表示・会計用の共有読み取りをここで必ず捨てる。
+    # 送信の前後で建玉/注文を確かめる経路が古い値に当たると
+    # 「送ったのに FLAT に見える」になる —— CLAUDE.md §4 の
+    # 「送信後は必ずブローカーを再照会する」はキャッシュより強い。
+    # ドライラン(confirm=False)でも捨てる: 送ったかどうかを親は断定できない。
+    try:
+        import broker_status
+        broker_status.invalidate_read_cache()
+    except Exception:  # noqa: BLE001 — 捨てられなくても送信は止めない
+        pass
     # R41: **エンコーディングを固定する。** `text=True` は Windows のロケール
     # (この運用機は cp932)で子の出力をデコードする。order.py は日本語を UTF-8 で
     # 出すので、チャンク境界次第で reader スレッドが UnicodeDecodeError を投げ、
@@ -3383,6 +3558,60 @@ def _composite_reference_price(ctx: Dict[str, Any]) -> Optional[float]:
     return fresh if fresh is not None else _price_from_bundle(ctx.get("bundle") or {})
 
 
+
+#: R118: 試験から差し替えるための注入点。**本番では None**(共有の予算とレーンを使う)。
+#: これが無いと、試験が `.secrets/comms_budget.json` と `.secrets/lanes/` へ書いてしまう。
+MANAGE_BUDGET = None
+MANAGE_LANE_DIR = None
+
+
+def _manage_accounts_parallel(accounts, run_one):
+    """口座別の管理を回す。既定は **逐次**(従来と 1 バイトも変わらない)。
+
+    `execution_contract.json` の `gateway.coordinator.enabled` が true のときだけ
+    レーンへ分けて並行に走らせる。口座レーン(`AccountLane`)と通信予算
+    (`CommsBudget`)は Coordinator と**同じもの**を使うので、`fill_watch` や
+    `order.py` の子プロセスと枠を食い合わない。
+
+    戻り値は口座 → 注記。**例外はその口座の注記へ畳む** —— 1 口座の事故で
+    他の口座の管理まで止めない(従来の逐次経路では止まっていた)。
+    """
+    accounts = list(accounts)
+    if not accounts:
+        return {}
+    try:
+        import execution_coordinator as coordinator
+        parallel = coordinator.max_parallel() if coordinator.enabled() else 1
+    except Exception:  # noqa: BLE001 — 読めなければ従来どおり逐次
+        coordinator, parallel = None, 1
+
+    if parallel <= 1 or len(accounts) == 1 or coordinator is None:
+        out = {}
+        for account in accounts:
+            out[account] = list(run_one(account))
+        return out
+
+    budget = MANAGE_BUDGET if MANAGE_BUDGET is not None else coordinator.CommsBudget()
+    lane_dir = MANAGE_LANE_DIR
+
+    def guarded(account):
+        try:
+            with coordinator.AccountLane(account, directory=lane_dir).hold(timeout=120.0):
+                budget.take(coordinator.budget_units("MODIFY"))
+                return list(run_one(account))
+        except TimeoutError as exc:
+            # レーンも枠も取れなかった = **何も送っていない**。次の周期で拾う。
+            return [f"autotrade deferred: account lane busy ({exc})"]
+        except Exception as exc:  # noqa: BLE001
+            return [f"AUTOTRADE HALT: management failed ({type(exc).__name__}: {exc})"]
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(parallel, len(accounts)),
+                            thread_name_prefix="manage") as pool:
+        results = list(pool.map(guarded, accounts))
+    return dict(zip(accounts, results))
+
+
 def _composite_execute(ctx: Dict[str, Any], plan: Dict[str, Any], plan_key: str,
                        action: Dict[str, Any], position: Dict[str, Any],
                        states: Optional[List[Dict[str, Any]]],
@@ -3740,9 +3969,10 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
         import broker_status
         broker_order_query = broker_status.query_orders
     frozen_for_query = _frozen_plan(records, symbol, account=target_account or None)
-    known_order_ids = [row.get("orderId") for row in
-                       ((frozen_for_query or {}).get("routeSnapshot") or [])
-                       if isinstance(row, dict) and row.get("orderId")]
+    # R115: 凍結 route snapshot は scope 全口座の行を持つ。**この口座の行だけ**渡す。
+    known_order_ids = [row.get("orderId") for row in _route_rows_for_account(
+                           (frozen_for_query or {}).get("routeSnapshot"), target_account)
+                       if row.get("orderId")]
     try:
         order: Optional[Dict[str, Any]] = _query_orders_with_ids(
             broker_order_query, symbol, known_order_ids)
@@ -3760,7 +3990,9 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
     # 観測として今サイクルを止める(FLAT を記録しない)。どちらでもなければ従来どおり。
     if open_qty == 0 and _latest_generation_open(records, target_account):
         try:
-            recheck = query(symbol)
+            # R114: 再確認は共有を読んでは意味が無い(同じ観測が返るだけ)。生で読む。
+            with _live_broker_reads():
+                recheck = query(symbol)
         except Exception:  # noqa: BLE001 - 再照会の失敗は裏付け無しとして元の観測へ戻る
             recheck = None
         if isinstance(recheck, dict) and recheck.get("verified") is True:
@@ -4283,6 +4515,49 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
                           and str(detail.get("reason") or "") == "ENTRY_CLAIM_RECOVERY_UNVERIFIED"
                           and (not identity_bound
                                or bool(detail.get("identityUnresolvable"))))
+            # R69 の穴(2026-09-18): claim の口座がブローカーから消えていると、その口座への
+            # 照会は永久に verified=false になり、**どの失敗理由でも**不在証明を組めない
+            # (実測は ENTRY_RECOVERY_CURRENT_BROKER_PROOF_INVALID)。DO 側には消えた scope を
+            # 名簿で不在証明にする stale release があるので、上の 2 つと同じく判定を委ねる。
+            # identity の有無で分けないのは、口座ごと消えた以上 ID による終端証明も
+            # 同じく永久に作れないため。詳細は _claim_scope_vanished_from_broker。
+            if not deferrable and _claim_scope_vanished_from_broker(view, claim_view):
+                deferrable = True
+            # R112(2026-09-19): DO 側が **この recover の最中に** claim を捨てていることがある。
+            # `_recover_entry_from_current_broker` は不在の証明を publish してから RECOVER を
+            # 呼ぶが、その publish 自体が「消費できない claim + ブローカー空」の条件を満たすと
+            # DO は観測イベントの中で claim を解放する(R112)。すると続く RECOVER は相手が
+            # 居らず `ENTRY_CLAIM_TOKEN_INVALID` で 409 になる —— **望んだ結果が出ているのに
+            # 失敗として blocked を返していた**。正本を読み直し、枠が実際に空いていれば進む。
+            if not deferrable:
+                try:
+                    import nqx_state
+                    fresh = state_query() if state_query is not None else nqx_state.fetch_state_quiet()
+                except Exception:  # noqa: BLE001 — 読めなければ従来どおり止める
+                    fresh = None
+                fresh_claim = fresh.get("entryClaim") if isinstance(fresh, dict) else None
+                released = (isinstance(fresh, dict)
+                            and (fresh_claim is None
+                                 or str((fresh_claim or {}).get("entryKey") or "")
+                                 != str(claim_view.get("entryKey") or "")))
+                if released:
+                    detail = {"released": True, "reason": "ENTRY_CLAIM_RELEASED_BY_DO",
+                              "recoverResult": detail}
+                    deferrable = True
+                # R116(2026-09-19): 多口座 claim は DO の RECOVER 証明を構造的に通せない
+                # (1 回の観測で全 receipt を照合する設計)。DO が stale release 可と言い
+                # (`staleReleasable`)、かつ engine が **全口座** の不在(verified FLAT・
+                # blocking 注文なし)を自分の観測で確かめたときだけ CLAIM へ委ねる。
+                # engine は何も解放しない —— 解放は CLAIM 時に DO が自分でやる。
+                # 2026-09-19 01:50 の 7 口座 ENTRY(受理 14/14・約定 0)がこれで
+                # 2 時間以上 RECOVERY_UNVERIFIED のまま新規を塞いだ。
+                elif (isinstance(fresh_claim, dict)
+                      and str(fresh_claim.get("entryKey") or "") == str(claim_view.get("entryKey") or "")
+                      and fresh_claim.get("staleReleasable") is True
+                      and _claim_scope_all_flat(claim_view, _claim_recovery_symbol(claim_view, symbol))):
+                    detail = {"released": False, "reason": "ENTRY_CLAIM_STALE_RELEASABLE_ALL_FLAT",
+                              "recoverResult": detail}
+                    deferrable = True
             if not deferrable:
                 return [f"autotrade blocked: ENTRY startup recovery failed ({detail})"]
         recovered_row = {"key": claim_view.get("entryKey"), "entryKey": claim_view.get("entryKey"),
@@ -4563,9 +4838,13 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
                         "action": "ENTRY", "plan": plan, "reason": verify_detail}, ledger_path)
         return [f"AUTOTRADE HALT: {verify_detail}"]
     try:
+        # R115: broker_order_query はこの口座に束縛されている。他口座の注文 ID を渡すと
+        # アダプタが scope 外として弾き、送信後照合が必ず UNVERIFIED になる。
+        opened_account = str(opened_position.get("accountId") or opened_position.get("account") or "")
         post_entry_orders = _query_orders_with_ids(
             broker_order_query, plan["symbol"],
-            [row.get("orderId") for row in route_snapshot if row.get("orderId")])
+            [row.get("orderId") for row in _route_rows_for_account(route_snapshot, opened_account)
+             if row.get("orderId")])
     except Exception as exc:  # noqa: BLE001
         post_entry_orders = {"verified": False, "detail": f"{type(exc).__name__}: {exc}"}
     opened_generation = (_observe_position_generation(records, opened_position, ledger_path)
@@ -4667,8 +4946,11 @@ def _narrow_bundle_scope(bundle: Dict[str, Any], accounts: List[str]) -> Dict[st
 
 def _scoped_position_query(query, symbol: str, account: str) -> Dict[str, Any]:
     if query is None:
+        # R114: 観測は 1 サイクル 1 回の共有読み取りを使う(prime_cycle_snapshot が
+        # 先に取っている)。送信後は _run_order が共有を捨てるので必ず生になり、
+        # 証明用の二度読みは live_reads() の中で呼ばれるので共有を読まない。
         import broker_status
-        return broker_status.query_position(symbol, account=account)
+        return broker_status.query_position_cached(symbol, account=account)
     try:
         parameters = inspect.signature(query).parameters
     except (TypeError, ValueError):
@@ -4683,8 +4965,8 @@ def _scoped_position_query(query, symbol: str, account: str) -> Dict[str, Any]:
 def _scoped_order_query(query, symbol: str, account: str, known_order_ids=None) -> Dict[str, Any]:
     if query is None:
         import broker_status
-        return broker_status.query_orders(
-            symbol, known_order_ids=known_order_ids, account=account)
+        return broker_status.query_orders_cached(
+            symbol, account=account, known_order_ids=known_order_ids)
     try:
         parameters = inspect.signature(query).parameters
     except (TypeError, ValueError):
@@ -4863,15 +5145,19 @@ def _reconcile_locked(bundle, state_ok, merged, broker_query, runner, ledger_pat
         return ["autotrade blocked: bundle is not an object"]
 
     symbol = str(proposal.get("symbol") or merged.get("NQX_SYMBOL") or contract_month.symbol())
-    positions = {account: _scoped_position_query(broker_query, symbol, account)
-                 for account in accounts}
+    # R113(2026-09-19): 口座ごとの照会は互いに独立なので並列に走らせる。逐次だと
+    # 7 口座で 1 サイクルが 284 秒になり、`monitor_publish.py` の 300 秒タイムアウトごと
+    # 落ちた(実測 160 本)。**読み取りだけ**の並列化で、送信は従来どおり順番を守る。
+    import broker_status
+    positions = dict(zip(accounts, broker_status.parallel_map(
+        accounts, lambda account: _scoped_position_query(broker_query, symbol, account))))
     unverified_positions = [account for account, value in positions.items()
                             if not isinstance(value, dict) or value.get("verified") is not True]
     if unverified_positions:
         return ["autotrade blocked: broker position is UNVERIFIED for "
                 + ",".join(unverified_positions)]
-    orders = {account: _scoped_order_query(broker_order_query, symbol, account)
-              for account in accounts}
+    orders = dict(zip(accounts, broker_status.parallel_map(
+        accounts, lambda account: _scoped_order_query(broker_order_query, symbol, account))))
     unverified_orders = [account for account, value in orders.items()
                          if not isinstance(value, dict) or value.get("verified") is not True]
     if unverified_orders:
@@ -4898,7 +5184,7 @@ def _reconcile_locked(bundle, state_ok, merged, broker_query, runner, ledger_pat
         # otherwise FLAT account is canceled through the existing FLATTEN path.
         live = live_enabled(merged)
         kill = kill_enabled(merged)
-        for account in targets:
+        def _manage_account(account):
             cancel_resting = (not entry_enabled and account in blocking_accounts
                               and account not in open_accounts)
             scoped_cfg = {**merged, "CROSSTRADE_ACCOUNTS": account,
@@ -4913,10 +5199,17 @@ def _reconcile_locked(bundle, state_ok, merged, broker_query, runner, ledger_pat
                 broker_query, requested_symbol, account)
             order_query = lambda requested_symbol, known_order_ids=None, account=account: _scoped_order_query(
                 broker_order_query, requested_symbol, account, known_order_ids)
-            account_notes = _reconcile_one(
+            return _reconcile_one(
                 bundle, state_ok, scoped_cfg, position_query, runner, ledger_path, now,
                 order_query, state_query, claim_entry, claim_management,
                 recover_entry, recover_management, broker_fills_query=broker_fills_query)
+
+        # R118: 口座間は並行にできる(既定は従来どおり逐次)。口座内は
+        # `_reconcile_one` がそのまま直列。**判定と台帳の順序は入力順に戻す** ——
+        # 並行なのは待ち時間だけで、記録と報告は再現可能でなければならない。
+        managed = _manage_accounts_parallel(targets, _manage_account)
+        for account in targets:
+            account_notes = managed.get(account) or []
             # R46: 手動で進めている建玉は「その口座だけ」経路から外す。KILL は
             # 台帳外の建玉も落とす明示経路なので、除外判定を一切しない。
             if (not kill_requested and account in open_accounts

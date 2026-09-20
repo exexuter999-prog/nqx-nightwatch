@@ -109,10 +109,29 @@ thin = execution_contract.evaluate(
     scenario, MARKET, None, None, cfg=CFG_ONE, ultra=True, ultra_buffer=3000.0)
 check("残DD不足は RISK_CAP_EXCEEDED", "RISK_CAP_EXCEEDED" in thin["blockers"])
 
+# R109(2026-09-18): ULTRA は複数口座で張れる。上限は契約の ultra.maxAccounts で、
+# 0 口座と上限超えだけが ULTRA_SCOPE_OUT_OF_ENVELOPE。
 two = execution_contract.evaluate(
     scenario, MARKET, None, None, cfg={"CROSSTRADE_ACCOUNTS": "A-111,B-222"},
     ultra=True, ultra_buffer=4000.0)
-check("2口座スコープは ULTRA_SCOPE_NOT_SINGLE", "ULTRA_SCOPE_NOT_SINGLE" in two["blockers"])
+check("2口座スコープは scope で弾かれない",
+      "ULTRA_SCOPE_OUT_OF_ENVELOPE" not in two["blockers"], str(two["blockers"]))
+check("2口座スコープはそのまま凍結される", two["accountScope"] == ["A-111", "B-222"],
+      str(two["accountScope"]))
+
+_max_accounts = int(execution_contract.CONTRACT["ultra"]["maxAccounts"])
+too_many = execution_contract.evaluate(
+    scenario, MARKET, None, None,
+    cfg={"CROSSTRADE_ACCOUNTS": ",".join(f"ACC-{i:03d}" for i in range(_max_accounts + 1))},
+    ultra=True, ultra_buffer=4000.0)
+check("上限超えの口座数は ULTRA_SCOPE_OUT_OF_ENVELOPE",
+      "ULTRA_SCOPE_OUT_OF_ENVELOPE" in too_many["blockers"], str(too_many["blockers"]))
+
+empty_scope = execution_contract.evaluate(
+    scenario, MARKET, None, None, cfg={"CROSSTRADE_ACCOUNTS": ""},
+    ultra=True, ultra_buffer=4000.0)
+check("口座ゼロは ULTRA_SCOPE_OUT_OF_ENVELOPE",
+      "ULTRA_SCOPE_OUT_OF_ENVELOPE" in empty_scope["blockers"], str(empty_scope["blockers"]))
 
 normal = execution_contract.evaluate(
     {**ultra_raw(qty=2, legs=(1, 1)), "issuedAt": NOW.isoformat(),

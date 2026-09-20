@@ -393,11 +393,16 @@ def evaluate(scenario: Optional[Dict[str, Any]], market: Optional[Dict[str, Any]
     if ultra_mode:
         # ULTRA: リスク上限の正本は残ドローダウン(producer は ultra_buffer、
         # 下流は凍結された riskCapDollars)。RISK_* と $240 既定は使わない。
-        # 口座は同時に1つだけ — ENTRY claim key が口座次元を持たないため。
+        # R109(2026-09-18): 口座は 1 つ以上・契約の ultra.maxAccounts 以下。
+        # intent は scope 全体で枚数を 1 つしか持たないので、producer
+        # (monitor_publish._apply_ultra_prefs)は **同じ利益目標の口座だけ**を
+        # scope に入れ、リスク上限は残った口座の最小残ドローダウンで凍結する。
+        # 1 口座だけに戻したいときは execution_contract.json の
+        # ultra.maxAccounts を 1 にする(Worker も同じ値を見る)。
         if isinstance(frozen_scope, list) and frozen_scope:
             account_scope = sorted({str(value) for value in frozen_scope if str(value)})
-        if len(account_scope) != 1:
-            blockers.append("ULTRA_SCOPE_NOT_SINGLE")
+        if not account_scope or len(account_scope) > int(ultra_env["maxAccounts"]):
+            blockers.append("ULTRA_SCOPE_OUT_OF_ENVELOPE")
         buffer_cap = _number(ultra_buffer) if ultra else frozen_cap
         max_account_risk = float(ultra_env["maxRiskDollarsPerAccount"])
         if buffer_cap is None or buffer_cap <= 0:

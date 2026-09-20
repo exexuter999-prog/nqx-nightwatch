@@ -70,6 +70,9 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
+import cycle_timing  # R118: 段階別の所要(読むだけ)
+
+
 def in_window(now: Optional[datetime] = None) -> bool:
     """JST 07:00〜翌 05:45 か。窓の外ではデータ取得も評価も発注もしない。"""
     local = (now or datetime.now(timezone.utc)).astimezone(JST).time()
@@ -414,6 +417,19 @@ def _blocked_reasons(cycle: Dict[str, Any]) -> List[str]:
 
 # ------------------------------------------------------------------ ビーコン
 
+def record_source_cycle(status: str) -> None:
+    """R118: その周期の観測の出所を 1 行残す(影運転の確認に使う)。
+
+    **`gateway.mode=OFF` の間は 1 バイトも書かない。** 記録に失敗しても周期の
+    終了コードは変えない。読むのは `python broker_source.py --shadow-report`。
+    """
+    try:
+        import broker_source
+        broker_source.record_cycle(status=status)
+    except Exception:  # noqa: BLE001 — 記録専用。運用は止めない
+        pass
+
+
 def send_beacon(status: str, reason: str = "") -> None:
     """ループ生死の別便(「監視の監視」)。
 
@@ -526,6 +542,10 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
               cvd_retry: Optional[bytes] = None, fetch: bool = True) -> int:
     import autotrade_arm  # 遅延 import（表示のためだけに読む）
 
+    # R118: 段階の記録をこの周期ぶんだけにする。**同じプロセスで 2 周期回すと
+    # 累積する**(本番は 1 プロセス 1 周期なので出ないが、試験では実際に出た)。
+    cycle_timing.reset()
+
     if not force_window and not in_window():
         note = settle_after_window()
         line = f"[{datetime.now(JST):%H:%M}] 監視窓外（JST 07:00〜翌05:45）— 停止中"
@@ -558,9 +578,18 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
     # (単一インスタンス。起動の失敗で周期は止めない)。
     try:
         import fill_watch
-        print(fill_watch.supervise())
+        with cycle_timing.phase("fill_watch_supervise"):
+            print(fill_watch.supervise())
     except Exception as exc:  # noqa: BLE001 - 表示専用
         print(f"fill_watch: status unavailable ({type(exc).__name__})")
+    # R118: 観測の出所と Gateway の生死。**周期は止めない。**
+    # 契約 `gateway.autostart=true`(既定 false)のときだけ、止まった常駐を起動し直す
+    # —— 接続は利用者あたり 1 本なので、既定では人が張った接続に触らない。
+    try:
+        import broker_gateway
+        print(broker_gateway.supervise())
+    except Exception as exc:  # noqa: BLE001 - 表示専用
+        print(f"gateway: status unavailable ({type(exc).__name__})")
 
     if cvd_retry is not None:
         # CVD 再取得だけを 1 度投入して、同じ pipeline をもう一度回す。
@@ -573,28 +602,32 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
         print(f"  cvd-retry ingested: {detail}")
     else:
         if fetch:
-            ok, detail = stage_fetch()
+            with cycle_timing.phase("tv_fetch"):
+                ok, detail = stage_fetch()
             if not ok:
                 print(f"BLOCKED: fetch — {detail}")
                 send_beacon("BLOCKED", f"fetch — {detail}")
                 return 1
             if detail:
                 print(f"  fetch: {detail.splitlines()[-1]}")
-        ok, detail = stage_acquire(replay=replay)
+        with cycle_timing.phase("tv_snapshot"):
+            ok, detail = stage_acquire(replay=replay)
         if not ok:
             print(f"BLOCKED: acquisition — {detail}")
             send_beacon("BLOCKED", f"acquisition — {detail}")
             return 1
         for line in detail.splitlines():
             print(f"  {line}")
-        ok, detail = stage_ingest("snapshot", TV_BUNDLE.read_bytes())
+        with cycle_timing.phase("ingest"):
+            ok, detail = stage_ingest("snapshot", TV_BUNDLE.read_bytes())
         if not ok:
             print(f"HALT: snapshot ingest failed — {detail}")
             send_beacon("HALT", f"snapshot ingest failed — {detail}")
             return 2
         print(f"  ingest receipt: {detail}")
 
-    status, cycle, detail = stage_pipeline()
+    with cycle_timing.phase("pipeline"):
+        status, cycle, detail = stage_pipeline()
     if status == "ERROR":
         print(f"HALT: pipeline — {detail}")
         send_beacon("HALT", f"pipeline — {detail}")
@@ -609,6 +642,9 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
 
     if status != "READY":
         reasons = "; ".join(_blocked_reasons(cycle))
+        print("  " + cycle_timing.line())
+        cycle_timing.dump(status="BLOCKED", reason=reasons[:200])
+        record_source_cycle("BLOCKED")
         print(report_line(cycle, False, f"BLOCKED {reasons}"))
         send_beacon("BLOCKED", reasons)
         cvd = cycle.get("cvd") or {}
@@ -625,10 +661,17 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
         print(report_line(cycle, False, "DRY（publish 未実行）"))
         return 0
 
-    published, publish_detail, published_state = stage_publish()
+    with cycle_timing.phase("publish"):
+        published, publish_detail, published_state = stage_publish()
+    # 子プロセス(monitor_publish)の内訳をこの表へ畳み、機械行は表示から外す。
+    cycle_timing.absorb(publish_detail)
+    publish_detail = "\n".join(
+        line for line in publish_detail.splitlines()
+        if not line.strip().startswith(cycle_timing.MARKER))
     for line in publish_detail.splitlines():
         print(f"  {line}")
-    audit = save_audit()
+    with cycle_timing.phase("audit"):
+        audit = save_audit()
     if audit:
         print(f"  audit: {audit.name}")
     if not published:
@@ -645,6 +688,9 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
     demoted = publish_demotion_notes(publish_detail)
     tail = " ".join(x for x in ("HALT" if halted else "",
                                 f"demoted: {demoted[0]}" if demoted else "") if x)
+    print("  " + cycle_timing.line())
+    cycle_timing.dump(status="PUBLISHED", halted=halted)
+    record_source_cycle("HALT" if halted else "PUBLISHED")
     print(report_line(cycle, True, tail, published_state=published_state))
     return 2 if halted else 0
 

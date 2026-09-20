@@ -1245,8 +1245,12 @@ def reconcile(bundle: Dict[str, Any], *, accounts: List[str],
     if not accounts:
         return []
     injected = position_query is not None
-    position_query = position_query or broker_status.query_position
-    balance_query = balance_query or broker_status.query_balance
+    # R113(2026-09-19): 戦績記録は**会計**であって送信の検証ではない。
+    # 同じサイクルで engine と表示が既に取った建玉・残高をそのまま使う
+    # (7 口座で 18 本 / 25 秒を取り直していた)。注入された query があれば
+    # そちらが優先されるのは従来どおり。
+    position_query = position_query or broker_status.query_position_cached
+    balance_query = balance_query or broker_status.query_balance_cached
     if fills_query is _BROKER:
         fills_query = None if injected else broker_status.query_fills
     symbol = str(bundle.get("sourceSymbol") or bundle.get("symbol") or contract_month.symbol())

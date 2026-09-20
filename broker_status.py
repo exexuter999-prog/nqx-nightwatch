@@ -25,6 +25,10 @@ Tradovate / CrossTrade の実照会を行い、**照会できなかった場合�
     python broker_status.py --account LTATANOBA1000000000002 --json
 """
 import argparse
+import contextlib
+import threading
+import concurrent.futures
+import atexit
 import hashlib
 import json
 import os
@@ -450,10 +454,229 @@ def read_env(path):
     return cfg
 
 
+#: 一過性として扱う HTTP(R111, 2026-09-18)。**429 と 5xx だけ**。
+#: 400 は retry しない —— CrossTrade は「スコープ外の口座」「消えた注文 ID」に 400 を返す
+#: (R53 の `_order_unresolvable` はこれが終端であることに依存している)。
+HTTP_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+#: 429 / 5xx の試行回数。応答は速いので 3 回まで。
+HTTP_RETRY_ATTEMPTS = 3
+#: 接続不能・タイムアウトの試行回数。1 回が最大 HTTP_TIMEOUT 秒かかるので 2 回まで。
+HTTP_RETRY_TRANSPORT_ATTEMPTS = 2
+#: 待ち時間(秒)。Retry-After があればそちらを優先し、この上限で丸める。
+HTTP_RETRY_BACKOFF_SEC = (0.75, 1.75)
+HTTP_RETRY_MAX_SLEEP_SEC = 5.0
+#: このプロセス全体で retry に使ってよい秒数の上限(R113, 2026-09-19)。
+#: 使い切ったら以後は 1 回で諦め、従来どおり `Unavailable` にする。
+#:
+#: なぜ要るか: R111 の retry は「1 本の一過性 429」を吸収するためのものだった。
+#: ところがレート制限は**全部の照会に同時に**かかるので、29 本がそれぞれ 3 回試行 +
+#: バックオフを踏むと 1 サイクルが 200 秒を超え、`monitor_publish.py` の 300 秒
+#: タイムアウトごと落ちる —— UNVERIFIED 1 本より遥かに悪い(2026-09-19 に 2 回連続で実測)。
+#: 「たまたま落ちた 1 本を救う」ための retry が、「全部落ちているとき」に効いてはいけない。
+#: 2026-09-19 実測で 20 秒でも足りなかった。レート制限が継続的にかかっている間は
+#: 「1 本だけ落ちた」ではなく「全部落ちている」ので、retry は待ち時間を積むだけになる。
+#: 5 秒 = 一過性の 429 を 2〜3 本ぶん吸収して、そこで諦める。
+HTTP_RETRY_BUDGET_SEC = float(os.environ.get("NQX_BROKER_RETRY_BUDGET_SEC") or 5.0)
+_RETRY_SPENT = [0.0]
+
+
+#: CrossTrade への読み取り照会の最小間隔(秒)。0 で無効。
+#: 実測の上限は概ね 3 req/s。fill_watch が別プロセスで最大 1 req/s 使うので、
+#: こちらは 2.9 req/s 相当に抑えて余地を残す(R111, 2026-09-18)。
+def _float_env(name, default):
+    try:
+        raw = os.environ.get(name)
+        return default if raw in (None, "") else max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+#: **既定は 0(間引きなし)**。2026-09-19 の実測で、照会 1 本の往復が 1.4〜4.2 秒
+#: あり、逐次で既に 0.7 req/s しか出ていないことが分かった。間引きは発動しないのに
+#: retry と重なると待ち時間だけを積む。上げるのは「照会本数を減らして実際に
+#: 3 req/s へ近づいたとき」で、そのときは `NQX_BROKER_MIN_INTERVAL_SEC` で入れる。
+HTTP_MIN_INTERVAL_SEC = _float_env("NQX_BROKER_MIN_INTERVAL_SEC", 0.0)
+_LAST_REQUEST_AT = [0.0]
+#: 間引きは並列照会(R113)から同時に呼ばれる。ロック無しだと全員が同じ
+#: `_LAST_REQUEST_AT` を見て一斉に通り、間引きが機能しない。
+_PACE_LOCK = threading.Lock()
+#: 何本の照会を間引いたか(計測用。1 サイクルのコストを測るときに見る)。
+_PACE_STATS = {"requests": 0, "sleptSec": 0.0}
+#: 照会の内訳(R113 の計測用)。`NQX_BROKER_PROFILE=1` で終了時に書き出す。
+#: 子プロセス(monitor_publish / order.py)の中の照会も拾えるようにここへ置く。
+_QUERY_STATS = {}
+
+
+def _query_label(url):
+    """照会 URL を人が読める分類名にする。"""
+    text = str(url or "")
+    if "/fills" in text:
+        return "fills"
+    if "/positions" in text:
+        return "positions"
+    if "/position" in text:
+        return "position"
+    if "/orders" in text or re.search(r"/order/[^/]+$", text):
+        return "orders"
+    if re.search(r"/accounts/[^/?]+$", text):
+        return "balance"
+    if text.rstrip("/").endswith("/accounts"):
+        return "roster"
+    return "other"
+
+
+def _record_query(url, elapsed):
+    label = _query_label(url)
+    entry = _QUERY_STATS.setdefault(label, {"n": 0, "sec": 0.0})
+    entry["n"] += 1
+    entry["sec"] += elapsed
+    # 子プロセスが timeout で kill されると atexit は走らないので、
+    # `NQX_BROKER_PROFILE=1` のときは 1 本ごとに追記しておく。
+    if os.environ.get("NQX_BROKER_PROFILE") == "1":
+        try:
+            with open(os.path.join(BASE, ".secrets", "broker_profile.jsonl"),
+                      "a", encoding="utf-8") as fh:
+                # 呼び出し元(このモジュールの外側の最初のフレーム)も残す。
+                # 「同じ一覧照会を 1 サイクルに何度も呼んでいる」のがどこかを
+                # 特定するには、種別だけでは足りない(R113)。
+                caller = "?"
+                try:
+                    frame = sys._getframe(2)
+                    while frame is not None and frame.f_code.co_filename == __file__:
+                        frame = frame.f_back
+                    if frame is not None:
+                        caller = "%s:%s" % (os.path.basename(frame.f_code.co_filename),
+                                            frame.f_code.co_name)
+                except Exception:  # noqa: BLE001
+                    pass
+                fh.write(json.dumps({
+                    "at": now_iso(), "pid": os.getpid(),
+                    "argv": os.path.basename(sys.argv[0] if sys.argv else "?"),
+                    "q": label, "by": caller,
+                    "sec": round(elapsed, 3)}, ensure_ascii=False) + chr(10))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _dump_query_profile():
+    """終了時に照会の内訳を追記する(`NQX_BROKER_PROFILE=1` のときだけ)。
+
+    サイクルが 3 分に収まらなくなったとき、どの照会が時間を食っているかは
+    推測ではなく実測でしか分からない。口座が増えるたびに同じ問いが来るので、
+    計測そのものをリポジトリに残す(既定では何もしない)。
+    """
+    if os.environ.get("NQX_BROKER_PROFILE") != "1" or not _QUERY_STATS:
+        return
+    try:
+        row = {"at": now_iso(), "pid": os.getpid(),
+               "argv": " ".join(os.path.basename(v) for v in sys.argv[:2]),
+               "queries": _QUERY_STATS,
+               "pacedSleptSec": round(_PACE_STATS["sleptSec"], 3),
+               "retrySpentSec": round(_RETRY_SPENT[0], 3)}
+        with open(os.path.join(BASE, ".secrets", "broker_profile.jsonl"),
+                  "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + chr(10))
+    except Exception:  # noqa: BLE001 — 計測が本流を殺さない
+        pass
+
+
+atexit.register(_dump_query_profile)
+
+
+def _pace_request():
+    """直前の照会から ``HTTP_MIN_INTERVAL_SEC`` 空ける(R111)。
+
+    7 口座になって 1 サイクルの照会が名簿 + 残高 7 + 建玉 7 + 注文 7 + fills と
+    28 本を超えた。間隔を空けずに撃つと必ず 429 に触れ、**そのうち 1 本が落ちるだけ**で
+    engine は fail-closed になり、そのサイクルの新規・変更が全部止まる。retry(下)は
+    落ちた後の保険で、こちらは落とさないための間引き。
+
+    プロセス内だけの間引きなので `fill_watch`(別プロセス・自前で 1 req/s 以下)とは
+    協調しない。両方を足しても上限に収まるよう、こちらを 3 req/s より下に置いてある。
+    """
+    interval = HTTP_MIN_INTERVAL_SEC
+    if not interval or interval <= 0:
+        return
+    with _PACE_LOCK:
+        _PACE_STATS["requests"] += 1
+        elapsed = time.monotonic() - _LAST_REQUEST_AT[0]
+        wait = interval - elapsed if 0 <= elapsed < interval else 0.0
+        # 次の枠を先に予約してからロックを離す。待っている間に別スレッドを
+        # 通してしまうと間引きにならない。
+        _LAST_REQUEST_AT[0] = time.monotonic() + wait
+    if wait > 0:
+        _PACE_STATS["sleptSec"] += wait
+        time.sleep(wait)
+
+
+def _retry_after_seconds(exc):
+    """`Retry-After` を秒で返す。読めなければ None(推測しない)。"""
+    try:
+        raw = exc.headers.get("Retry-After")
+    except Exception:  # noqa: BLE001 — ヘッダが無い形の例外もある
+        return None
+    if raw is None:
+        return None
+    try:
+        return max(0.0, min(float(str(raw).strip()), HTTP_RETRY_MAX_SLEEP_SEC))
+    except (TypeError, ValueError):
+        return None   # HTTP-date 形式。待ち時間は既定のバックオフに任せる。
+
+
 def _get_json(url, headers=None, timeout=HTTP_TIMEOUT):
+    """読み取り専用の GET。一過性の失敗だけ数回だけ retry する(R111)。
+
+    なぜ要るか(2026-09-18): 発注先が 1 口座から 7 口座になり、1 サイクルの照会が
+    建玉+注文で 14 本、残高と名簿を足すとさらに増えた。CrossTrade は概ね 3 req/s で
+    429 を返すので、**そのうち 1 本が落ちるだけ**で engine は fail-closed になり
+    `broker position is UNVERIFIED for <口座>` でそのサイクルの新規・変更が全部止まる。
+    `fill_watch` は元から 429 を 15 秒待つのに(`rateLimitBackoffSec`)、3 分ループ側の
+    照会には retry が無く、一過性の 429 と「本当に照会できない」を区別できなかった。
+
+    **retry してよいのは冪等な GET だけ。** ここの呼び出し元は建玉・注文・残高・名簿・
+    fills の照会しかない。送信(`order.py`)はこの関数を通らないし、通してもいけない
+    —— CLAUDE.md §7 の「部分成功・タイムアウト後の無条件リトライ」の禁止はそのまま。
+
+    それでも駄目なら例外をそのまま上げる。呼び出し側は従来どおり `Unavailable` にして
+    **建玉ゼロとは言わない**(fail-closed の性質は変えない)。
+    """
     req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8", "replace"))
+    attempt = 0
+    while True:
+        attempt += 1
+        _pace_request()
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+            _record_query(url, time.monotonic() - started)
+            return payload
+        except urllib.error.HTTPError as exc:
+            _record_query(url, time.monotonic() - started)
+            if exc.code not in HTTP_RETRY_STATUSES or attempt >= HTTP_RETRY_ATTEMPTS:
+                raise
+            pending, delay = exc, _retry_after_seconds(exc)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            _record_query(url, time.monotonic() - started)
+            # URLError は OSError の子。タイムアウトも含めてここへ来る。
+            if attempt >= HTTP_RETRY_TRANSPORT_ATTEMPTS:
+                raise
+            pending, delay = exc, None
+        else:  # pragma: no cover — 上の return で抜ける
+            return None
+        if delay is None:
+            index = min(attempt - 1, len(HTTP_RETRY_BACKOFF_SEC) - 1)
+            delay = HTTP_RETRY_BACKOFF_SEC[index]
+        delay = min(delay, HTTP_RETRY_MAX_SLEEP_SEC)
+        # 予算を使い切っていたら retry しない。ここで raise すると
+        # 呼び出し側は従来どおり Unavailable = 「照会できない」になる。
+        spent = time.monotonic() - started
+        if _RETRY_SPENT[0] + spent + delay > HTTP_RETRY_BUDGET_SEC:
+            # 予算切れ。except 節を抜けているので bare raise は使えない。
+            _RETRY_SPENT[0] += spent
+            raise pending
+        _RETRY_SPENT[0] += spent + delay
+        time.sleep(delay)
 
 
 def _post_json(url, payload, headers=None, timeout=HTTP_TIMEOUT):
@@ -463,6 +686,146 @@ def _post_json(url, payload, headers=None, timeout=HTTP_TIMEOUT):
     req = urllib.request.Request(url, data=data, headers=merged, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8", "replace"))
+
+
+#: 口座ごとの読み取り照会を何本まで同時に走らせるか(R113, 2026-09-19)。
+#: `NQX_BROKER_PARALLEL` で上書き。**既定は 1(逐次)**。
+#:
+#: 2026-09-19 の実測で、並列化しても速くならないことが分かった。CrossTrade は
+#: 同時接続を絞るので、6 並列にすると 1 本あたりの往復が 1.4 秒 → 4.2 秒へ伸びて
+#: 相殺され、429 で落ちる本数だけが増える(7 口座中 3〜4 口座が UNVERIFIED)。
+#: 逐次 132〜180 秒に対して並列 132 秒 —— 速度は同じで信頼性だけ下がる。
+#:
+#: 仕組みは残す。サイクルが遅い本当の原因は **照会が 160 本ある**ことで
+#: (口座あたり 23 本。orders だけで 98 本 = 凍結注文 ID ごとの詳細照会)、
+#: そちらを減らすのが筋。本数が減れば並列化が効くようになるので、そのときに
+#: `NQX_BROKER_PARALLEL` を上げて測り直す。
+BROKER_PARALLEL_WORKERS = int(_float_env("NQX_BROKER_PARALLEL", 1))
+
+
+def parallel_map(items, call):
+    """口座ごとの **読み取り専用** 照会を並列に走らせる(R113)。
+
+    なぜ要るか(2026-09-19 実測): 発注先が 7 口座になり、1 サイクルの照会が
+    **160 本・284 秒**になった(orders 98 本 / positions 23 / balance 14 /
+    position 22)。1 本 1.8 秒の往復を逐次に並べているだけで、`monitor_publish.py` の
+    300 秒タイムアウトごと落ちる。口座ごとの照会は互いに独立なので、並べる理由が無い。
+
+    **読み取りにだけ使うこと。** 送信(`order.py`)は口座ごとに順番と台帳の
+    整合が要るので並列化しない —— CLAUDE.md §5 の「decisionId ごとに一度だけ」は
+    順序の話でもある。
+
+    逐次と同じ結果を返す: 入力の順序を保ち、例外は**入力順で最初のもの**を
+    そのまま送出する(どのスレッドが先に落ちたかで挙動が変わらないように)。
+    """
+    entries = list(items)
+    if not entries:
+        return []
+    workers = min(int(BROKER_PARALLEL_WORKERS or 1), len(entries))
+    if workers <= 1:
+        return [call(item) for item in entries]
+    results = [None] * len(entries)
+    errors = [None] * len(entries)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(call, item): index for index, item in enumerate(entries)}
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            try:
+                results[index] = future.result()
+            except BaseException as exc:  # noqa: BLE001 — 入力順で送出し直す
+                errors[index] = exc
+    for error in errors:
+        if error is not None:
+            raise error
+    return results
+
+
+# ---------------------------------------------------------------- 読み取りの共有(R113)
+
+#: 表示・会計用の読み取りを 1 プロセス内で共有する秒数。0 で無効。
+#: **送信の検証経路では絶対に使わない**(CLAUDE.md §4「送信後は必ず再照会する」)。
+#:
+#: 既定は 1 サイクルを丸ごと覆う長さにしてある。25 秒にしていたときは、サイクルが
+#: 258 秒あるせいで engine が取った建玉が表示・戦績記録の番までに期限切れになり、
+#: **同じものを取り直していた**(共有の意味が無い)。長くして安全なのは、
+#: (a) 使うのが表示と会計だけで、(b) `order.py` を起動するたびに必ず捨てるから
+#: (`autotrade_engine._run_order`。テスト `test_r113_read_cache_safety.py`)。
+READ_CACHE_TTL_SEC = _float_env("NQX_BROKER_READ_CACHE_SEC", 240.0)
+_READ_CACHE = {}
+_READ_CACHE_LOCK = threading.Lock()
+#: 共有層の統計。misses = 実際にブローカーへ行った読み取りの数(R114 の要約が使う)。
+#: HTTP 層(_QUERY_STATS)ではなくここで数えるのは、fake を差し込んだテストでも
+#: 本番でも「同じ意味の数」になるようにするため。
+_READ_CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+def invalidate_read_cache():
+    """共有を捨てる。**注文を送った後は必ず呼ぶこと。**
+
+    R118: Gateway のスナップショットの写しも一緒に捨てる。送信の後に古い写しを
+    読むと「送ったのに FLAT に見える」が Gateway 経路でも起きる。
+    """
+    with _READ_CACHE_LOCK:
+        _READ_CACHE.clear()
+    try:
+        import broker_source
+        broker_source.invalidate_snapshot()
+    except Exception:  # noqa: BLE001 — 捨てられなくても運用は止めない
+        pass
+
+
+_LIVE_READS = threading.local()
+
+
+@contextlib.contextmanager
+def live_reads():
+    """この文脈の中では共有を **読まず**、必ずブローカーへ行く(R114)。
+
+    使いどころは「二度読んで同じであることが証明になる」経路 —— DO への不在証明の
+    三点読み(`autotrade_engine._stable_broker_snapshot`)と、R52 の一瞬 FLAT の再確認。
+    共有に当たると before/after が同じオブジェクトになり、**証明が偽物になる**。
+    読んだ結果は共有へ書き戻す(以後の表示は新しい方を使う)。
+    """
+    previous = getattr(_LIVE_READS, "on", False)
+    _LIVE_READS.on = True
+    try:
+        yield
+    finally:
+        _LIVE_READS.on = previous
+
+
+def cached_read(key, produce, ttl=None):
+    """同じ読み取りを 1 プロセス内で使い回す(R113)。
+
+    なぜ要るか(2026-09-19 実測): 7 口座で 1 サイクルの照会が 70〜160 本になり、
+    `monitor_publish.py` が 300 秒でタイムアウトするようになった。呼び出し元を
+    記録したところ、**同じデータを別々の呼び出し元が取り直している**のが正体だった:
+
+        build_accounts_payload   balance   14 本(7 口座 × 2 回)  31.0 秒
+        trade_journal            位置+残高 18 本(全部すでに取得済み) 25.1 秒
+        live_position_line       位置      14 本(表示専用)        30.3 秒
+
+    **使ってよいのは表示・会計だけ。** 送信の前後で建玉/注文を確かめる経路
+    (engine の `_scoped_position_query` / `order.py` の送信前後)は、**必ず生の
+    照会**を使う。そこがキャッシュに当たると「送ったのに FLAT に見える」が起きる。
+
+    ``ttl`` は既定 ``READ_CACHE_TTL_SEC``。0 以下なら共有せず毎回取り直す。
+    """
+    window = READ_CACHE_TTL_SEC if ttl is None else ttl
+    if not window or window <= 0:
+        return produce()
+    now = time.monotonic()
+    if not getattr(_LIVE_READS, "on", False):
+        with _READ_CACHE_LOCK:
+            hit = _READ_CACHE.get(key)
+            if hit is not None and now - hit[0] < window:
+                _READ_CACHE_STATS["hits"] += 1
+                return hit[1]
+    _READ_CACHE_STATS["misses"] += 1
+    value = produce()
+    with _READ_CACHE_LOCK:
+        _READ_CACHE[key] = (time.monotonic(), value)
+    return value
 
 
 class Unavailable(Exception):
@@ -1656,27 +2019,152 @@ def query_fills(account=None, scoped=True):
             "detail": "; ".join(failures) or "no broker fills adapter is configured"}
 
 
+# R113(2026-09-19): 口座ファンアウトは並列で走らせる。口座ごとの照会は互いに
+# 独立で、逐次に並べる理由が無い。7 口座で 1 サイクル 160 本・284 秒だったのが
+# ここの逐次が原因だった(`parallel_map` の docstring に実測)。
+# **読み取りだけ**。送信は順番と台帳の整合が要るので並列化しない。
+
 def query_balances(accounts=None):
     """Return one independently verified balance snapshot per configured account."""
     scope = [str(value).strip() for value in (accounts or []) if str(value).strip()]
-    return {account: query_balance(account=account) for account in scope}
+    return dict(zip(scope, parallel_map(
+        scope, lambda account: query_balance_cached(account=account))))
+
+
+def query_balance_cached(account=None):
+    """残高の共有読み取り(R113)。**表示・ULTRA サイジング専用。**
+
+    残高は送信の検証に使わない(建玉と注文で検証する)ので共有して安全。
+    `build_accounts_payload` が 1 サイクルに 2 回呼ばれる(publish 用と
+    `_apply_ultra_prefs` 用)のがそのまま 2 倍の照会になっていた。
+    """
+    return cached_read(("balance", str(account)), lambda: query_balance(account=account))
+
+
+def _default_account():
+    """account=None のときブローカー層が使う既定口座(CROSSTRADE_ACCOUNTS の先頭)。
+
+    共有読み取りの鍵をそろえるため。`query_position(symbol)` と
+    `query_position(symbol, account=<先頭>)` は同じ照会なので、同じ鍵にする。
+    """
+    raw = str(read_env(CROSSTRADE_ENV).get("CROSSTRADE_ACCOUNTS") or "")
+    for value in raw.replace(chr(10), ",").split(","):
+        if value.strip():
+            return value.strip()
+    return None
+
+
+def _source():
+    """R118: 出所層。循環 import を避けるため遅延で読む。"""
+    import broker_source
+    return broker_source
+
+
+def query_position_cached(symbol=DEFAULT_SYMBOL, account=None):
+    """建玉の共有読み取り(R113 / R114 / R118)。**観測用。**
+
+    送信の前後で建玉を確かめる経路と、二度読みが証明になる経路
+    (`autotrade_engine._stable_broker_snapshot`、一瞬 FLAT の再確認)は
+    `live_reads()` の中で呼ぶこと。そこでは共有を読まずブローカーへ行く。
+
+    R118: 出所は `broker_source` が決める(既定 OFF = 従来どおり REST)。
+    `live_reads()` の中は **必ず REST**。押し込みのスナップショットを二度読んでも
+    証明にならないので、ここで Gateway を挟むと不在証明が偽物になる。
+    """
+    key_account = account if account is not None else _default_account()
+    if getattr(_LIVE_READS, "on", False):
+        return cached_read(("position", str(symbol), str(key_account)),
+                           lambda: query_position(symbol, account=account))
+    return cached_read(
+        ("position", str(symbol), str(key_account)),
+        lambda: _source().position(
+            symbol, key_account,
+            rest_call=lambda: query_position(symbol, account=account)))
+
+
+def query_orders_cached(symbol=DEFAULT_SYMBOL, account=None, known_order_ids=None):
+    """注文の共有読み取り(R114)。**観測用。**
+
+    鍵に `known_order_ids` を含める。ID 付きの照会は開いている一覧に加えて
+    ID ごとの詳細(終端した注文)を持つので、ID 無しの結果で代用できない。
+    送信後の再確認(`_run_order` の後)は共有が捨てられているので必ず生になる。
+    """
+    ids = tuple(sorted(str(value) for value in (known_order_ids or []) if str(value or "").strip()))
+    key_account = account if account is not None else _default_account()
+    if getattr(_LIVE_READS, "on", False):
+        return cached_read(
+            ("orders", str(symbol), str(key_account), ids),
+            lambda: query_orders(symbol, known_order_ids=known_order_ids, account=account))
+    return cached_read(
+        ("orders", str(symbol), str(key_account), ids),
+        lambda: _source().orders(
+            symbol, key_account, known_order_ids=known_order_ids,
+            rest_call=lambda: query_orders(
+                symbol, known_order_ids=known_order_ids, account=account)))
+
+
+def prime_cycle_snapshot(symbol=DEFAULT_SYMBOL, accounts=None):
+    """1 サイクル分のブローカー観測を **最初に一度だけ** 取る(R114 一括照会)。
+
+    なぜ要るか(2026-09-19 実測): 発注先が 7 口座になり、表示・engine・戦績記録・
+    ULTRA サイジングがそれぞれ独立にブローカーへ行った結果、1 サイクルの照会が
+    70〜160 本・111〜284 秒になった。CrossTrade は 429 ではなく**応答を遅らせて**絞る
+    (同じ照会 5 連で 0.69 → 5.05 → 16.26 秒)ので、並列も retry も効かず、本数だけが効く。
+
+    ここで口座ごとに建玉・注文(ID 無し)・残高を 1 回ずつ取り、共有へ入れる。
+    以後の消費者は共有を読む。1 口座あたり 3 本が床で、7 口座なら 21 本。
+    共有を **読まない** のは (a) `order.py` を起動した後(`_run_order` が捨てる)、
+    (b) `live_reads()` の中(証明用の二度読み)、の 2 つだけ。
+
+    戻り値は監査用の要約。`unverified` に入った口座は engine が従来どおり
+    fail-closed で止める(ここでは何も判断しない)。
+    """
+    scope = [str(value).strip() for value in (accounts or []) if str(value).strip()]
+    # 前サイクルの残りは使わない。今の観測で始める。
+    invalidate_read_cache()
+    # R118: Gateway のスナップショットも取り直す。ここから先の 1 サイクルは
+    # **同じ世代**を読む(口座ごとに別の時点を混ぜない)。
+    source = _source()
+    source.invalidate_snapshot()
+    source.reset_stats()
+    before = _READ_CACHE_STATS["misses"]
+    started = time.monotonic()
+    unverified = []
+    for account in scope:
+        position = query_position_cached(symbol, account=account)
+        if not isinstance(position, dict) or position.get("verified") is not True:
+            unverified.append(f"{account}:position")
+        orders = query_orders_cached(symbol, account=account)
+        if not isinstance(orders, dict) or orders.get("verified") is not True:
+            unverified.append(f"{account}:orders")
+        try:
+            query_balance_cached(account=account)
+        except Exception:  # noqa: BLE001 — 残高は任意(残機は LIFELINE_ へ落ちる)
+            unverified.append(f"{account}:balance")
+    return {"symbol": str(symbol), "accounts": len(scope),
+            "queries": _READ_CACHE_STATS["misses"] - before,
+            "seconds": round(time.monotonic() - started, 1),
+            "unverified": unverified, "takenAt": now_iso(),
+            # R118: どこから答えたか。REST へ落ちた口座と理由もここに出る。
+            "source": source.stats()}
 
 
 def query_positions(symbol=DEFAULT_SYMBOL, accounts=None):
     """Return one independently verified position snapshot per configured account."""
     scope = [str(value).strip() for value in (accounts or []) if str(value).strip()]
-    return {account: query_position(symbol, account=account) for account in scope}
+    return dict(zip(scope, parallel_map(
+        scope, lambda account: query_position(symbol, account=account))))
 
 
 def query_orders_by_account(symbol=DEFAULT_SYMBOL, accounts=None, known_order_ids=None):
     """Return one independently verified order snapshot per configured account."""
     scope = [str(value).strip() for value in (accounts or []) if str(value).strip()]
     ids = known_order_ids or {}
-    return {account: query_orders(
+    return dict(zip(scope, parallel_map(scope, lambda account: query_orders(
         symbol,
         known_order_ids=(ids.get(account) if isinstance(ids, dict) else ids),
         account=account,
-    ) for account in scope}
+    ))))
 
 
 def query_accounts():

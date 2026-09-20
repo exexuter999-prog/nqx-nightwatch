@@ -22,7 +22,11 @@ def main():
     failures = []
     for name in names:
         print(f"\n{'=' * 68}\n>>> {name}\n{'=' * 68}", flush=True)
-        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+        # R118: 段階別の記録は本番の `.secrets/cycle_timing.jsonl` へ追記する。
+        # 試験は `run_cycle` を段階差し替えで呼ぶので、止めないと 0.1 秒の周期で
+        # 本番の記録が埋まり、集計が読めなくなる(2026-09-19 に 16 件溜まった)。
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+                   NQX_CYCLE_TIMING="0")
         proc = subprocess.run([sys.executable, os.path.join(HERE, name)], env=env)
         if proc.returncode != 0:
             failures.append(name)

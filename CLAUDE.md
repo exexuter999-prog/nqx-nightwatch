@@ -420,10 +420,35 @@ python autotrade_arm.py --status
   契約 `fillWatch.autostart=true`**: `nqx_cycle` が毎周期 `fill_watch:` 行で生死を出し、止まっていれば
   切り離したプロセスとして起動し直す(単一インスタンス `.secrets/fill_watch.lock`、出力 `.secrets/fill_watch.log`)。
   照会は建玉あり 1.5 秒・FLAT 5 秒、fill_watch 自身は毎秒 1 リクエスト以下、429 で 15 秒待つ、ループの
-  reconcile 中は照会しない。CrossTrade の Tradovate 口座は REST のみ(WebSocket は NT8 だけ・約定プッシュ無し)
-  なので、これが経路上の最速(実測: 照会 1 本 ≈0.6 秒)。止めるときは `autostart=false` にしてから heartbeat の
+  reconcile 中は照会しない。止めるときは `autostart=false` にしてから heartbeat の
   pid を止める。R78 導入後 09-15 まで一度も常駐していなかった(2026-09-11 01:40 に 3 分遅れの建値移動で
   stop が拒否され runner が裸になった)。根拠は `docs/R91_FILL_WATCH_REALTIME.md`。
+  **訂正(R118, 2026-09-19)**: ここには「CrossTrade の Tradovate 口座は REST のみ(WebSocket は NT8 だけ・
+  約定プッシュ無し)なので REST の見回りが経路上の最速」と書いてあったが、**実接続で誤りと確認した** ——
+  Tradovate 口座も `wss://app.crosstrade.io/ws/stream` へ `positions` / `orders` / `executions` を
+  プッシュし、受信フレームはレート枠を消費しない。また見回りの実効間隔は
+  `max(fastIntervalSec, sweep_cost / maxRequestsPerSec)` なので **口座数で伸びる**(20 口座で 20 秒)。
+  出所を押し込みへ切り替えると口座数に依存せず `fastIntervalSec` になる。切り替えは
+  `execution_contract.json` の `gateway.mode`(**既定 OFF** = 従来どおり REST)で、Gateway が落ちた口座は
+  自動で REST へ退避するので検知に穴は空かない。根拠は `docs/R118_GATEWAY_INTEGRATION.md`。
+  **2026-09-20 ユーザー決定で本番へ投入した**: `gateway.mode=LIVE` / `autostart=true` /
+  `sendVerification=true` / `coordinator.enabled=true`(並列数 6・レート予算・既存の安全ゲートは不変)。
+  観測は全口座 1 リクエストの押し込みになり、`order.py` の送信前後の検証と `fill_watch` の見回りも
+  そこから取る(Gateway が落ちた口座・`known_order_ids` つきの照会・`live_reads()` の中は従来どおり REST)。
+  **常駐は契約を読み直さない** —— 設定を変えたら `python broker_gateway.py --stop` → `--start`。
+  `fill_watch` も同じで、古いプロセスのままだと出所が REST に残る(2026-09-20 に実際に起きた)。
+  緊急の戻しは `NQX_GATEWAY_MODE=OFF` / `NQX_GATEWAY_AUTOSTART=0` / `NQX_COORDINATOR=0`
+  (いずれも契約より強い・即時)。**損益には触らない** —— Entry / SL / 枚数 / モデル判定は 1 つも変わらない。
+  投入時の確認と残作業は `docs/R118_GATEWAY_INTEGRATION.md` §12H / §12E。
+  **導入の段と判定条件(2026-09-20)**: 段は 常駐 → SHADOW → LIVE → 送信検証 → Coordinator の 5 つで、
+  **いまどの段まで進めるかは `python verify_r118_live.py`**(読むだけ・通信なし)。数値の条件は
+  `docs/R118_GATEWAY_INTEGRATION.md` §12D —— 段 2 → 3 は **周期 200・比較の成立 500 件・食い違い 0・
+  不成立 5% 未満・建玉のあった周期が 1 つ以上**。影運転の確認は「差分ログが空」ではなく
+  **`python broker_source.py --shadow-report` で比較が成立していること**(常駐が止まっていても差分ログは
+  空になる)。常駐は契約 `gateway.autostart`(**既定 false**。接続は利用者あたり 1 本なので、既定では
+  人が張った接続に触らない)で `nqx_cycle` が起動し直せる。緊急停止は `NQX_GATEWAY_MODE=OFF` /
+  `NQX_GATEWAY_AUTOSTART=0`(どちらも契約より強い)。**R118 はまだ完了していない** —— 残作業は §12E
+  (CrossTrade への問い合わせは未送信、`executionUpdate` の行は未実装、本番の実測は未取得、口座は 7 つ)。
 - **contract 行(R102)**: `nqx_cycle` は `autotrade:` の次に `contract: MNQU6 (CME_MINI:MNQU2026) exp 2026-09-18 (3d) entry=ok`
   を出す。`entry=CONTRACT_EXPIRY_NEAR` は新規停止(管理・撤退は続く)。env / wrangler.toml / monitor_config.json の
   NQX_SYMBOL が正本と食い違えば `HALT: CONTRACT_SYMBOL_DISAGREE` で相場データを取る前に止まる。

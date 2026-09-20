@@ -65,12 +65,57 @@ def last_divergence_pt(cfg=None):
     return max(value, 0.25)
 
 
+def _send_verification_source():
+    """送信前後の検証を Gateway(押し込み)から取ってよいか。**既定 false。**
+
+    これは安全に関わる切り替えなので、三つ全部が揃ったときだけ有効になる:
+
+    1. 契約 `gateway.sendVerification` が true
+    2. 出所層が `LIVE`(SHADOW では答えを変えない)
+    3. その口座のスナップショットが `VERIFIED` かつ鮮度内(出所層が判定する)
+
+    どれか欠ければ `None` を返し、呼び出し側は従来どおり REST を叩く。
+    **穴は空かない** —— 悪くなるのは速度だけ。
+
+    なぜ要るか(2026-09-19 実測): ENTRY 1 回で `order.py` が打つ `/v1/api/*` は
+    1 口座 6 本(FLAT 検証 2 + 送信前の窓 2 + 脚ごとの identity 2)。20 口座なら
+    120 本で、**補充待ちだけで 34 秒**。押し込みから取ればここが消える。
+    """
+    try:
+        if not (execution_contract.CONTRACT.get("gateway") or {}).get("sendVerification"):
+            return None
+        import broker_source
+        return broker_source if broker_source.mode() == broker_source.LIVE else None
+    except Exception:  # noqa: BLE001 — 読めなければ従来どおり REST
+        return None
+
+
+def _verify_position(symbol, account=None):
+    """送信前後の建玉照会。出所は `_send_verification_source()` が決める。"""
+    source = _send_verification_source()
+    if source is None:
+        return broker_status.query_position(symbol, account=account)
+    return source.position(symbol, account,
+                           rest_call=lambda: broker_status.query_position(symbol, account=account))
+
+
+def _verify_orders(symbol, account=None, known_order_ids=None):
+    """送信前後の注文照会。ID 指定つきは出所層が必ず REST へ回す。"""
+    source = _send_verification_source()
+    if source is None:
+        return broker_status.query_orders(symbol, known_order_ids=known_order_ids,
+                                          account=account)
+    return source.orders(symbol, account, known_order_ids=known_order_ids,
+                         rest_call=lambda: broker_status.query_orders(
+                             symbol, known_order_ids=known_order_ids, account=account))
+
+
 def require_verified_flat(symbol, accounts=None, purpose="live order"):
     scope = [str(value) for value in (accounts or []) if str(value)]
     if not scope:
         scope = [None]
     for account in scope:
-        result = broker_status.query_position(symbol, account=account)
+        result = _verify_position(symbol, account=account)
         label = str(account or result.get("accountId") or "configured account")
         if not result.get("verified"):
             detail = result.get("detail") or "broker position query unavailable"
@@ -373,6 +418,29 @@ def post_to_accounts(cfg, accounts, lines_for_account, label,
     return True, results
 
 
+def _coordinator_lanes():
+    """R118: 口座間を何本まで同時に走らせるか。既定は 1(= 従来どおり逐次)。
+
+    ENTRY の claim は **1 プロセスで 1 回**消費されるので、口座をプロセスへ
+    分けることはできない(`consume_entry_claim` は accountScope を含む intent hash
+    で束縛される)。よって並行化はこのプロセスの **中** で行う。
+    口座内は従来どおり直列 —— TP1 → RUNNER の順序が脚の identity 束縛の根拠。
+    """
+    override = str(os.environ.get("NQX_COORDINATOR_LANES") or "").strip()
+    if override:
+        try:
+            return max(1, min(32, int(override)))
+        except (TypeError, ValueError):
+            return 1
+    try:
+        section = (execution_contract.CONTRACT.get("gateway") or {}).get("coordinator") or {}
+        if not section.get("enabled"):
+            return 1
+        return max(1, min(32, int(section.get("maxParallel") or 1)))
+    except Exception:  # noqa: BLE001 — 読めなければ従来どおり逐次
+        return 1
+
+
 def post_split_to_accounts(cfg, accounts, lines_for_account, label,
                            identity_probe=None, identities=None, identity_settle=None):
     """Send independently bracketed split legs and report every account/leg.
@@ -382,15 +450,22 @@ def post_split_to_accounts(cfg, accounts, lines_for_account, label,
 
     ``identity_settle(results)`` (R76) runs once after every leg was posted and
     may bind legs the per-leg window missed, before acceptance is judged.
+
+    R118: 口座間は Coordinator のレーン数まで並行に走る(既定 1 = 従来と同一)。
+    **口座内は必ず直列。** 出力は口座ごとに溜めて入力順に出す —— 並行でそのまま
+    print すると行が混ざり、`route_envelope` の「SNAPSHOT と FINAL は各 1 本」
+    「途中に ERROR 印を出さない」という契約を壊す。
     """
-    results = []
     resolved = identities if identities is not None else {}
-    for account in accounts:
+    lanes = _coordinator_lanes()
+
+    def run_account(account):
+        lines_out, rows = [], []
         for leg, lines in lines_for_account(account):
-            print(f"--- {label.upper()} account={account} leg={leg} ---")
-            print("\n".join(lines).replace(cfg["CROSSTRADE_KEY"], "***KEY***"))
+            lines_out.append(f"--- {label.upper()} account={account} leg={leg} ---")
+            lines_out.append("\n".join(lines).replace(cfg["CROSSTRADE_KEY"], "***KEY***"))
             status, body = post(cfg, lines, f"{label}:{account}:{leg}")
-            results.append((account, leg, status, body))
+            rows.append((account, leg, status, body))
             # One snapshot per leg: TP1 and RUNNER carry identical entry
             # economics and can only be told apart by the window in which
             # their broker row appeared.
@@ -398,6 +473,25 @@ def post_split_to_accounts(cfg, accounts, lines_for_account, label,
                 identity = identity_probe(account, leg)
                 if identity:
                     resolved[(account, leg)] = identity
+        return lines_out, rows
+
+    if lanes <= 1 or len(accounts) <= 1:
+        results = []
+        for account in accounts:
+            printed, rows = run_account(account)
+            for line in printed:
+                print(line)
+            results.extend(rows)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(lanes, len(accounts)),
+                                thread_name_prefix="lane") as pool:
+            produced = list(pool.map(run_account, accounts))
+        results = []
+        for printed, rows in produced:
+            for line in printed:
+                print(line)
+            results.extend(rows)
     if identity_settle is not None:
         identity_settle(results)
     failed = [(account, leg, status) for account, leg, status, body in results
@@ -417,7 +511,7 @@ def _orders_snapshot(symbol, account=None):
     classified by its HTTP result.
     """
     try:
-        view = broker_status.query_orders(symbol, account=account)
+        view = _verify_orders(symbol, account=account)
     except Exception:  # noqa: BLE001 - acquisition must never break the route
         return None
     return view if isinstance(view, dict) and view.get("verified") is True else None
@@ -1163,7 +1257,9 @@ def main():
             sys.exit("ERROR: MANAGEMENT_CLAIM_REQUIRED")
         # 保有中ポジションの保護注文変更も、対象建玉を確認できないまま
         # 実行しない。照会不能時は --confirm 経路を止める。
-        verified = broker_status.query_position(a.symbol, account=account)
+        # R118: identity 窓(`_orders_snapshot`)と **同じ出所**で読む。片方が REST で
+        # 片方が押し込みだと、1 回の MODIFY が別々の瞬間の見え方で判断することになる。
+        verified = _verify_position(a.symbol, account=account)
         if not verified.get("verified"):
             sys.exit("ERROR: modify blocked — position is UNVERIFIED (broker query unavailable)")
         if int(verified.get("qty") or 0) <= 0:
@@ -1192,7 +1288,7 @@ def main():
             # 宣言し、建玉と一致しなければ拒否する。
             if held_qty != a.qty:
                 sys.exit(f"ERROR: MODIFY_POSITION_MISMATCH: 建玉 {held_qty} 枚 ≠ 指定 {a.qty} 枚")
-            guard_view = broker_status.query_orders(a.symbol, account=account)
+            guard_view = _verify_orders(a.symbol, account=account)
             if not isinstance(guard_view, dict) or guard_view.get("verified") is not True:
                 sys.exit("ERROR: modify blocked — protective orders are UNVERIFIED")
             opposite = "SELL" if a.side == "buy" else "BUY"
@@ -1239,7 +1335,7 @@ def main():
                       "runner の保護を張り直す修復として続行します(R78)")
         elif held_qty >= fixed_qty and a.repair_naked:
             # R102: 裸(OCO 組 0)の全量建玉に SL/TP を張る修復。組が 1 つでもあれば従来どおり拒否。
-            guard_view = broker_status.query_orders(a.symbol, account=account)
+            guard_view = _verify_orders(a.symbol, account=account)
             if not isinstance(guard_view, dict) or guard_view.get("verified") is not True:
                 sys.exit("ERROR: modify blocked — protective orders are UNVERIFIED")
             opposite = "SELL" if a.side == "buy" else "BUY"
@@ -1342,6 +1438,10 @@ def main():
                 a.management_key, a.management_token, "UNKNOWN",
                 receipt={"error": receipt_detail})
             sys.exit(f"ERROR: MODIFY_ROUTE_UNKNOWN: {receipt_detail}")
+        # R118: **ここは出所層を通さない。** 送信後の再照会は「送った結果」の証明で、
+        # 押し込みのスナップショットを読んでも証明にならない(CLAUDE.md §4「送信後は
+        # 必ずブローカーを再照会する」)。後から親切のつもりで `_verify_position` へ
+        # 変えないこと。
         middle = broker_status.query_position(a.symbol, account=account)
         middle_identity = broker_status.position_identity(middle)
         if (not isinstance(middle, dict) or middle.get("verified") is not True
@@ -1669,8 +1769,25 @@ def main():
             if ultra_risk > float(a.ultra_drawdown) + 1e-9:
                 sys.exit(f"ERROR: ULTRA_DRAWDOWN_EXCEEDED: "
                          f"想定損失 ${ultra_risk:,.2f} が残ドローダウン ${float(a.ultra_drawdown):,.2f} を超えます")
-        if len(accounts) != 1:
-            sys.exit("ERROR: ULTRA_SINGLE_ACCOUNT_PER_ROUTE: ULTRA は口座ごとに1回ずつ呼ぶ")
+        # R109(2026-09-18): ULTRA は複数口座へ **同じ枚数で** 送れる。ENTRY の送信は
+        # 元から口座ごとのループなので、ここで塞いでいたのは口座数だけだった。
+        # `--ultra-drawdown` は scope の **最小残ドローダウン**(monitor_publish が
+        # そう凍結する)なので、上の口座別判定はどの口座にも安全側で効いている。
+        # 合計側は 1 口座では効きようがなかったので、ここで明示的に見る
+        # (名前は execution_contract.ultra_evaluate / Worker と同じ)。
+        if len(accounts) > int(ultra_envelope["maxAccounts"]):
+            sys.exit(f"ERROR: ULTRA_ACCOUNTS_EXCEED_CONTRACT: "
+                     f"{len(accounts)} 口座 > 上限 {int(ultra_envelope['maxAccounts'])} 口座")
+        ultra_total_qty = int(a.qty) * len(accounts)
+        if ultra_total_qty > int(ultra_envelope["maxTotalQty"]):
+            sys.exit(f"ERROR: ULTRA_TOTAL_QTY_EXCEEDS_CONTRACT: "
+                     f"合計 {ultra_total_qty} 枚 > 上限 {int(ultra_envelope['maxTotalQty'])} 枚")
+        if not a.pyramid:
+            ultra_total_risk = ultra_risk * len(accounts)
+            if ultra_total_risk > float(ultra_envelope["maxRiskDollarsTotal"]) + 1e-9:
+                sys.exit(f"ERROR: ULTRA_TOTAL_RISK_EXCEEDS_CONTRACT: "
+                         f"合計 ${ultra_total_risk:,.2f} > "
+                         f"上限 ${float(ultra_envelope['maxRiskDollarsTotal']):,.2f}")
         print(f"ULTRA: {a.qty}枚 → TP1 {ultra_legs[0]}枚 / RUNNER {ultra_legs[1]}枚 "
               f"· 想定損失 ${ultra_risk:,.2f} / 残DD ${float(a.ultra_drawdown):,.2f}")
     else:

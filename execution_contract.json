@@ -301,14 +301,42 @@
     }
   },
   "fillWatch": {
-    "_note": "R91(2026-09-15, docs/R91_FILL_WATCH_REALTIME.md): 約定監視 fill_watch.py の常駐と照会間隔。CrossTrade の Tradovate 口座は REST のみ(WebSocket は NinjaTrader 8 口座だけ、約定のプッシュ通知も無い)なので、上限(利用者ごと毎秒 3 回・溜め 20 回、REST と WebSocket で共有、超過は 429)の中で照会を詰める。autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっていれば切り離したプロセスとして起動し直す(単一インスタンス、出力は .secrets/fill_watch.log)。fastIntervalSec = 建玉がある間の間隔 / idleIntervalSec = FLAT の間隔 / maxRequestsPerSec = fill_watch 自身の上限(ループの照会と送信後照会の分を残す。FLAT の照会は裏取りで 2 本) / rateLimitBackoffSec = 429 を見たら空ける秒数。ループの reconcile 中は照会しない。",
+    "_note": "R91(2026-09-15, docs/R91_FILL_WATCH_REALTIME.md): 約定監視 fill_watch.py の常駐と照会間隔。**訂正(R118, 2026-09-19 実接続)**: ここには『CrossTrade の Tradovate 口座は REST のみ(WebSocket は NinjaTrader 8 口座だけ、約定のプッシュ通知も無い)』と書いてあったが誤りで、Tradovate 口座も positions/orders/executions をプッシュする(受信フレームはレート枠を消費しない)。出所の切替は gateway.mode。REST で回している間は、上限(利用者ごと毎秒 3 回・溜め 20 回、REST と WebSocket で共有、超過は 429)の中で照会を詰める。autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっていれば切り離したプロセスとして起動し直す(単一インスタンス、出力は .secrets/fill_watch.log)。fastIntervalSec = 建玉がある間の間隔 / idleIntervalSec = FLAT の間隔 / maxRequestsPerSec = fill_watch 自身の上限(ループの照会と送信後照会の分を残す。FLAT の照会は裏取りで 2 本) / rateLimitBackoffSec = 429 を見たら空ける秒数。ループの reconcile 中は照会しない。",
     "version": "R91-FILL-WATCH-1",
     "_decisionNote": "2026-09-15 ユーザー決定で autostart=true(nqx_cycle が止まった fill_watch を毎周期起動し直す)。止めるときは false にしてからプロセスを止める(pid は .secrets/fill_watch_heartbeat.json)。",
     "autostart": true,
     "fastIntervalSec": 1.5,
-    "idleIntervalSec": 5.0,
+    "idleIntervalSec": 45.0,
     "maxRequestsPerSec": 1.0,
     "rateLimitBackoffSec": 15.0
+  },
+  "gateway": {
+    "_note": "R118(2026-09-19, docs/R118_GATEWAY_INTEGRATION.md): ブローカー観測の出所と、口座をまたぐ送信の調停。mode は OFF(従来どおり REST だけ) / SHADOW(答えは REST、裏で Gateway も読んで食い違いを .secrets/gateway_divergence.jsonl へ記録) / LIVE(答えは Gateway、口座ごとに VERIFIED かつ brokerObservation.maxAgeSec 以内でなければその口座だけ REST へ落ちる)。R91 の fillWatch の説明にある『CrossTrade の WebSocket は NinjaTrader 8 口座だけ』は 2026-09-19 の実接続で誤りと判明した(Tradovate 口座も positions/orders/executions をプッシュする)。Gateway は注文を送らない —— 送信は従来どおり order.py の全ゲートを通る。sendVerification=true にすると order.py の送信前後の検証も Gateway を正本にするが、押し込みのストリームを『送った証拠』に使うことになるので既定は false。",
+    "version": "R118-GATEWAY-1",
+    "_autostartNote": "autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっている常駐を切り離したプロセスとして起動し直す(broker_gateway.supervise / spawn_detached、出力は .secrets/broker_gateway.log、単一インスタンスは .secrets/broker_gateway.lock)。**既定 false** —— 接続は CrossTrade の利用者あたり 1 本で、人が手で張った接続を周期が勝手に切ると、切られた側は気づかない。mode=OFF の間は autostart=true でも起動しない(観測に Gateway を使っていないので、常駐させる意味が無い)。緊急停止は NQX_GATEWAY_AUTOSTART=0(契約より強い)。起動して 3 回続けて heartbeat が出なければ 1 時間止めて .secrets/broker_gateway.log を見てもらう。",
+    "_liveDecisionNote": "2026-09-20 ユーザー決定: 観測(mode=LIVE)・常駐の自動起動(autostart)・送信前後の検証(sendVerification)・口座別レーン(coordinator.enabled)をまとめて有効化した。並列数 6・レート予算・既存の安全ゲートは変更していない。有効化の前に確認したのは docs/R118_GATEWAY_INTEGRATION.md §12H(全口座の建玉ゼロ・未約定注文ゼロ・名簿と accountId の一致・Gateway 単一起動・7 口座すべて鮮度内 VERIFIED・REST と Gateway の照合 14 件一致)。戻しは NQX_GATEWAY_MODE=OFF / NQX_GATEWAY_AUTOSTART=0 / NQX_COORDINATOR=0(いずれも契約より強い)か、この 4 つの値を元へ。",
+    "mode": "LIVE",
+    "autostart": true,
+    "sendVerification": true,
+    "coordinator": {
+      "_note": "実行 Coordinator(execution_coordinator.py)。enabled=false の間は engine が従来どおり order.py を 1 回だけ呼ぶ(--accounts に全口座)。true にすると order.py の中で口座を maxParallel 本のレーンへ分けて同時に走らせる(ENTRY の claim は 1 プロセスで 1 回しか消費できないので、口座をプロセスへ分けることはできない)。口座内は必ず直列 —— TP1 → RUNNER の順序が脚 identity 束縛の根拠。",
+      "_budgetNote": "commsBudget は CrossTrade の利用者あたり上限。公式(crosstrade.io/docs/api/rate-limiting, 2026-09-19 確認)は『All API requests, whether over HTTP or WebSocket, share a single rate-limit budget of 3 requests per second』で、対象として挙がっているのは HTTP REST(/v1/api/*)と WebSocket RPC。**送信の webhook(/v1/send/...)はこのページに一度も出てこない。** よって予算は api 側だけで数え、send 側は別に数える(sendCountsAgainstApiBudget=null = 未確認)。ここを true に変える根拠は、CrossTrade からの回答か本番での実測のどちらか。推測で埋めない。",
+      "enabled": true,
+      "maxParallel": 6,
+      "commsBudget": {
+        "requestsPerSec": 3.0,
+        "burst": 20,
+        "reserveForObservation": 2,
+        "sendCountsAgainstApiBudget": null
+      },
+      "perAccountRequests": {
+        "_note": "1 口座あたりの本数。api = 上限の対象と確認できている /v1/api/* への照会。send = /v1/send/ への送信。2026-09-19 に模擬ブローカーで ENTRY の全経路を数えた内訳(1 口座あたり): 送信前の FLAT 検証 2 本(R41 の単数/複数の裏取りで 2 本)+ 送信前の窓(注文一覧 1・約定履歴 1)2 本 + 脚ごとの identity 束縛 2 本 = api 6 本、送信 2 本。**api 6 本は最良の場合**で、注文行がすぐ現れない周期は identity 束縛が NQX_IDENTITY_SETTLE_ATTEMPTS(既定 8)まで再照会するので、最悪 1 口座 20 本になりうる(2026-09-04 実測で行が出るまで 0.5〜1.3 秒)。Gateway で identity と検証を押し込みから取ると api は gatewayApi 本まで落ちる —— ENTRY は 1 本(約定履歴の窓 _fills_snapshot。executionUpdate の行を持っていないので REST のまま)、MODIFY/FLATTEN は 0 本。2026-09-19 に模擬で実測(照会 15 本 → 0 本。ただしこの測定に _fills_snapshot は含めていない)。",
+        "ENTRY": {"api": 6, "send": 2, "gatewayApi": 1},
+        "ENTRY_WORST": {"api": 20, "send": 2, "gatewayApi": 1},
+        "MODIFY": {"api": 4, "send": 1, "gatewayApi": 0},
+        "FLATTEN": {"api": 3, "send": 1, "gatewayApi": 0}
+      }
+    }
   },
   "accountMode": {
     "kind": "MIRRORED",

@@ -117,6 +117,7 @@ def telegram_utf8_preflight(text, limit=TELEGRAM_MAX_TEXT_BYTES):
     return "\n".join(kept) + suffix
 
 sys.path.insert(0, BASE)
+import cycle_timing  # R118: 段階別の所要(読むだけ)
 import nqx_state  # noqa: E402
 import msnr_gate  # noqa: E402  (R11-D pure strategy evaluator; never places orders)
 import autotrade_arm  # noqa: E402  (session-scoped arming ledger)
@@ -1697,13 +1698,41 @@ def _forget_position_card():
         pass
 
 
+def _ultra_profit_targets(prefs, account_ids):
+    """選ばれた ULTRA 口座の利益目標を {口座: 目標} で返す(未設定は None)。"""
+    targets = {}
+    for account_id in account_ids:
+        raw = (prefs.get(account_id) or {}).get("profitTarget")
+        try:
+            targets[account_id] = None if raw is None else float(raw)
+        except (TypeError, ValueError):
+            targets[account_id] = None
+    return targets
+
+
 def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
                        cycle_id, event_blackout):
-    """口座別 ULTRA 設定(Mini App 保存)を武装候補へ適用する(R47)。
+    """口座別 ULTRA 設定(Mini App 保存)を武装候補へ適用する(R47 / R109)。
 
     ユーザー決定(2026-08-30): **達成不能なら見送り**。ULTRA 対象口座が
-    設定されている間、通常2枚への切り替えは行わない — 目標に届く枚数が
-    出せないシナリオは WATCH に降格し、理由を注記に残す。
+    設定されている間、通常2枚への切り替えは行わない。
+
+    R109(2026-09-18 ユーザー決定): **ULTRA を複数口座で張れるようにした。**
+    ただし execution intent は scope 全体で枚数を1つしか持てない(口座別枚数は
+    R87 の直接発注経路の仕事)ので、次の 2 つを規則にする。
+
+      1. **同じ利益目標の口座だけ**同時に ULTRA にできる。目標が違うと必ず
+         「どれかの口座は目標に届かない」計画を黙って出すことになるため、
+         設定側で弾く(Mini App の選択 UI も同じ規則)。目標が同じなら
+         ``required_qty_split`` は同じ幾何に対して同じ枚数を返すので、
+         1 つの intent で全口座が自分の目標に届く。
+      2. **条件を満たさない口座はその口座だけ外して残りで出す**(R45 の
+         口座別リスク上限と同じ考え方)。残ドローダウンが足りない・目標に
+         届かない・照会できない口座は ``excludedAccounts`` とサイクル注記に
+         残して落とし、**1 口座も残らないときだけ**シナリオを見送る。
+
+    リスク上限は残った口座の **最小の残ドローダウン**で凍結する。凍結値は
+    scope 全体に同じ枚数で効くので、一番薄い口座が払える額が正本になる。
 
     返り値 ``(chosen, scenario, contract, notes)``。ULTRA 対象が無ければ無変更。
     ここは publish 前のサイジングであり、発注そのものは従来どおり
@@ -1719,7 +1748,7 @@ def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
     except Exception as exc:  # noqa: BLE001 — 確認できないときは ULTRA を発火させない
         notes.append(f"ultra prefs unavailable ({type(exc).__name__}) — normal sizing")
         return chosen, scenario, contract, notes
-    ultra_ids = [key for key, value in prefs.items() if value.get("ultra") is True]
+    ultra_ids = sorted(key for key, value in prefs.items() if value.get("ultra") is True)
     if not ultra_ids:
         return chosen, scenario, contract, notes
 
@@ -1739,33 +1768,58 @@ def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
         notes.append(f"ULTRA skip: {reason} — scenario demoted to WATCH (見送り)")
         return demoted, rebuilt, rebuilt["executionContract"], notes
 
-    if len(ultra_ids) > 1:
-        return _demote("multiple ULTRA accounts configured (claim scope allows one)")
-    account_id = ultra_ids[0]
-    scope = contract.get("accountScope") or []
-    if account_id not in scope:
-        return _demote(f"ULTRA account …{account_id[-6:]} is not in the executable scope")
+    def _tag(account_id):
+        return f"…{str(account_id)[-6:]}"
+
+    max_accounts = int(execution_contract.CONTRACT["ultra"]["maxAccounts"])
+    if len(ultra_ids) > max_accounts:
+        return _demote(f"{len(ultra_ids)} ULTRA accounts configured "
+                       f"(contract allows {max_accounts})")
+
+    # 規則 1: 利益目標が割れている設定は受けない(どれかが必ず目標に届かないため)。
+    targets = _ultra_profit_targets(prefs, ultra_ids)
+    if len({value for value in targets.values()}) > 1:
+        shown = ", ".join(f"{_tag(account_id)}="
+                          + ("none" if targets[account_id] is None else f"{targets[account_id]:g}")
+                          for account_id in ultra_ids)
+        return _demote(f"ULTRA accounts must share one profit target ({shown})")
+
+    # 規則 2: ここから落ちた口座は「外す」だけ。全滅のときだけ見送る。
+    dropped = []
+    scope = [str(value) for value in (contract.get("accountScope") or [])]
+    selected = [account_id for account_id in ultra_ids if account_id in scope]
+    for account_id in ultra_ids:
+        if account_id not in scope:
+            dropped.append((account_id, "NOT_IN_EXECUTABLE_SCOPE"))
+    if not selected:
+        return _demote("no ULTRA account is in the executable scope")
 
     try:
         import ultra_mode
         accounts_payload = nqx_state.build_accounts_payload(env=execution_cfg, prefs=prefs)
     except Exception as exc:  # noqa: BLE001
         return _demote(f"account data unavailable ({type(exc).__name__})")
-    rows = (accounts_payload or {}).get("list") or []
-    row = next((item for item in rows if str(item.get("id")) == account_id), None)
-    if row is None:
-        return _demote(f"ULTRA account …{account_id[-6:]} has no lifeline data")
+    by_id = {str(item.get("id")): item for item in ((accounts_payload or {}).get("list") or [])
+             if isinstance(item, dict)}
 
-    pref = prefs.get(account_id) or {}
-    effective = dict(row)
-    try:
-        pref_dd = pref.get("maxDrawdown")
-        if pref_dd is not None and float(pref_dd) > 0:
-            effective["buffer"] = min(float(row.get("buffer") or 0.0), float(pref_dd))
-    except (TypeError, ValueError):
-        pass
+    effective_rows = []
+    for account_id in selected:
+        row = by_id.get(account_id)
+        if row is None:
+            dropped.append((account_id, "NO_LIFELINE_DATA"))
+            continue
+        effective = dict(row)
+        try:
+            pref_dd = (prefs.get(account_id) or {}).get("maxDrawdown")
+            if pref_dd is not None and float(pref_dd) > 0:
+                effective["buffer"] = min(float(row.get("buffer") or 0.0), float(pref_dd))
+        except (TypeError, ValueError):
+            pass
+        effective_rows.append(effective)
+    if not effective_rows:
+        return _demote("ULTRA accounts have no lifeline data")
 
-    targets = chosen.get("targets") or [chosen.get("target")]
+    targets_list = chosen.get("targets") or [chosen.get("target")]
     # R52(2026-09-05 ユーザー決定): ULTRA のサイジングは **TP1 基準**で3経路を揃える。
     # Mini App(ultraPanel)と Bot(_ultra_order_gate → signal_from_scenario)は runner を
     # 渡さず TP1 だけで枚数を出すのに、auto 経路だけが runner を渡して R30 の分割式
@@ -1773,20 +1827,43 @@ def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
     # app の枚数を「ULTRA 枚数」として手動発注した。runner の目標価格は脚(legs)に
     # そのまま残す —— 変えるのは枚数の根拠だけで、執行の幾何は変えない。
     signal = {"side": chosen.get("side"), "entry": chosen.get("entry"),
-              "stop": chosen.get("stop"), "target": targets[0]}
-    plan = ultra_mode.build_plan(signal, [effective])
-    prow = (plan.get("accounts") or [{}])[0]
-    envelope = execution_contract.ultra_evaluate(plan)
-    if prow.get("verdict") != "ELIGIBLE" or prow.get("contractBlockers") or not envelope.get("ok"):
-        reasons = list(prow.get("reasons") or []) + list(prow.get("contractBlockers") or [])
-        reasons += [b for b in envelope.get("blockers") or [] if b not in reasons]
-        return _demote(f"…{account_id[-6:]} target unreachable ({', '.join(reasons) or 'INELIGIBLE'})")
+              "stop": chosen.get("stop"), "target": targets_list[0]}
+    plan = ultra_mode.build_plan(signal, effective_rows)
+    plan_rows = [row for row in (plan.get("accounts") or []) if isinstance(row, dict)]
+    eligible = [row for row in plan_rows
+                if row.get("verdict") == "ELIGIBLE" and not row.get("contractBlockers")]
+    keep_ids = {str(row.get("id")) for row in eligible}
+    for row in plan_rows:
+        account_id = str(row.get("id") or "")
+        if account_id in keep_ids:
+            continue
+        reasons = list(row.get("reasons") or []) + list(row.get("contractBlockers") or [])
+        dropped.append((account_id, ", ".join(reasons) or "INELIGIBLE"))
+    if not eligible:
+        shown = "; ".join(f"{_tag(account_id)} {reason}" for account_id, reason in dropped)
+        return _demote(f"no ULTRA account can carry the trade ({shown or 'INELIGIBLE'})")
 
-    qty = int(prow["qty"])
+    # 目標が同じなら枚数は一致するはず。割れたら 1 つの intent で表現できない。
+    quantities = sorted({int(row.get("qty") or 0) for row in eligible})
+    if len(quantities) != 1 or quantities[0] <= 0:
+        return _demote(f"ULTRA quantities disagree across accounts ({quantities})")
+    qty = quantities[0]
+
+    envelope = execution_contract.ultra_evaluate({**plan, "accounts": eligible})
+    if not envelope.get("ok"):
+        return _demote("envelope " + ", ".join(envelope.get("blockers") or ["INELIGIBLE"]))
+
+    account_ids = sorted(str(row.get("id")) for row in eligible)
+    buffers = [row.get("buffer") for row in eligible]
+    if any(value is None for value in buffers):
+        return _demote("ULTRA drawdown buffer unavailable")
+    # scope 全体に同じ枚数が飛ぶので、リスク上限は **一番薄い口座**が正本。
+    min_buffer = min(float(value) for value in buffers)
+
     leg_split = execution_contract.ultra_split(qty)
     resized = {**chosen, "qty": qty,
-               "legs": [{"id": "TP1", "qty": leg_split[0], "target": targets[0]},
-                        {"id": "RUNNER", "qty": leg_split[1], "target": targets[-1]}]}
+               "legs": [{"id": "TP1", "qty": leg_split[0], "target": targets_list[0]},
+                        {"id": "RUNNER", "qty": leg_split[1], "target": targets_list[-1]}]}
     try:
         rebuilt = nqx_state.build_scenario(
             {**resized, "scenarioId": resized.get("scenarioId"), "marketCycleId": cycle_id},
@@ -1796,14 +1873,31 @@ def _apply_ultra_prefs(chosen, scenario, contract, market, execution_cfg, cfg,
         return _demote(f"ultra scenario rebuild failed ({exc})")
     if resized.get("grade") in ("A+", "A", "B"):
         rebuilt = {**rebuilt, "grade": resized["grade"]}
-    ultra_cfg = {**execution_cfg, "CROSSTRADE_ACCOUNTS": account_id}
+    ultra_cfg = {**execution_cfg, "CROSSTRADE_ACCOUNTS": ",".join(account_ids)}
     ultra_contract = execution_contract.evaluate(
         rebuilt, market, None, None, cfg=ultra_cfg, event_blackout=event_blackout,
-        ultra=True, ultra_buffer=effective.get("buffer"))
+        ultra=True, ultra_buffer=min_buffer)
+    if dropped:
+        # 外した口座は必ず監査に残す(R45 と同じ規律)。
+        existing = list(ultra_contract.get("excludedAccounts") or [])
+        seen = {str(item.get("account")) for item in existing if isinstance(item, dict)}
+        for account_id, reason in dropped:
+            if account_id in seen:
+                continue
+            existing.append({"account": account_id, "reason": reason, "source": "ULTRA_PREFS"})
+            seen.add(account_id)
+        ultra_contract = {**ultra_contract, "excludedAccounts": existing}
     rebuilt["executionContract"] = ultra_contract
+    total_profit = sum(row.get("projectedProfit") or 0 for row in eligible)
+    total_loss = sum(row.get("projectedLoss") or 0 for row in eligible)
     notes.append(
-        f"ULTRA sized: …{account_id[-6:]} qty {qty} (TP1 {leg_split[0]} / RUNNER {leg_split[1]}) "
-        f"· projected profit ${prow.get('projectedProfit'):,.0f} / loss ${prow.get('projectedLoss'):,.0f}")
+        f"ULTRA sized: {len(account_ids)} account(s) "
+        f"{', '.join(_tag(account_id) for account_id in account_ids)} "
+        f"qty {qty} each (TP1 {leg_split[0]} / RUNNER {leg_split[1]}) "
+        f"· projected profit ${total_profit:,.0f} / loss ${total_loss:,.0f} total")
+    if dropped:
+        notes.append("ULTRA excluded: "
+                     + "; ".join(f"{_tag(account_id)} {reason}" for account_id, reason in dropped))
     return resized, rebuilt, ultra_contract, notes
 
 
@@ -2106,7 +2200,9 @@ def live_position_line(bundle):
     held = []
     for account in accounts:
         try:
-            row = broker_status.query_position(account=account)
+            # R113: 表示専用なので共有読み取りを使う(engine と戦績記録が
+            # 同じサイクルで同じ建玉を取り直していた)。送信の検証には使わない。
+            row = broker_status.query_position_cached(account=account)
         except Exception:  # noqa: BLE001  表示のために監視を止めない
             return None
         if not row.get("verified"):
@@ -2166,13 +2262,38 @@ def read_bundle_bytes(raw: bytes):
     return compact(json.loads(raw.decode("utf-8-sig")))
 
 
+def _prime_broker_snapshot():
+    """R114: 発注先全口座の建玉・注文・残高を 1 回ずつ取り、サイクル内で共有する。
+
+    失敗しても止めない —— 取れなかった口座は共有に入らず、engine が従来どおり
+    生で照会して fail-closed に止める。ここは速くするための前取りで、安全の門ではない。
+    """
+    try:
+        import broker_status
+        env = nqx_state._read_kv_env(nqx_state.CROSSTRADE_ENV)
+        raw = str(env.get("CROSSTRADE_ACCOUNTS") or env.get("CROSSTRADE_ACCOUNT") or "")
+        accounts = [value.strip() for value in raw.replace(chr(10), ",").split(",") if value.strip()]
+        if not accounts:
+            return
+        summary = broker_status.prime_cycle_snapshot(contract_month.symbol(), accounts)
+    except Exception as exc:  # noqa: BLE001 — 前取りの失敗は監視を止めない
+        print(f"  broker snapshot: skipped ({type(exc).__name__}: {exc})")
+        return
+    line = (f"  broker snapshot: {summary['accounts']} accounts · "
+            f"{summary['queries']} queries · {summary['seconds']:.1f}s")
+    if summary.get("unverified"):
+        line += " · UNVERIFIED " + ",".join(summary["unverified"])
+    print(line)
+
+
 def main():
     try:
         bundle = read_bundle_bytes(sys.stdin.buffer.read())
     except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError) as exc:
         raise SystemExit(f"ERROR: invalid monitor bundle: {exc}")
 
-    bundle, strategy_notes = enrich_decisive_strategy(bundle)
+    with cycle_timing.phase("publish.enrich"):
+        bundle, strategy_notes = enrich_decisive_strategy(bundle)
 
     previous = None
     previous_path = STATE_FILE
@@ -2192,29 +2313,40 @@ def main():
         print("skipped duplicate monitor bundle")
         return
 
+    # R114(2026-09-19): 1 サイクル分のブローカー観測を **ここで一度だけ** 取る。
+    # 以後の表示(live_position_line)・publish(build_accounts_payload)・engine の観測・
+    # 戦績記録は全部この共有を読む。7 口座で 70〜160 本あった照会を 1 口座 3 本の床へ。
+    with cycle_timing.phase("publish.broker_observe"):
+        _prime_broker_snapshot()
+
     # ライブ含み損益は publish の **前** に入れる。Mini App が読む正本と
     # Telegram 本文の両方が同じ 1 行を使うので、画面ごとに数字がずれない。
-    position_line = live_position_line(bundle)
+    with cycle_timing.phase("publish.position_line"):
+        position_line = live_position_line(bundle)
     if position_line:
         bundle["position"] = position_line
 
     # 先に state を publish する。Mini App が読むのはこちらであって、
     # 下の Telegram メッセージや URL ではない。
-    state_ok, state_notes = publish_state(bundle)
+    with cycle_timing.phase("publish.worker_state"):
+        state_ok, state_notes = publish_state(bundle)
     # R52: Worker の建玉 stream を **reconcile の前**に同期する。MANAGEMENT claim は
     # Worker が保持する建玉(qty / side / positionGeneration)と intent を突き合わせる
     # ので、これが無いと TP1 後の建値移動が MANAGEMENT_CLAIM_POSITION_MISMATCH で
     # 永久に出せない(2026-09-05 02:46 実測)。建玉 publish は telegram_bot 常駐の中に
     # しか無く、09-01 以降一度も更新されていなかった。
-    position_sync_notes = _sync_position_to_worker(state_ok)
+    with cycle_timing.phase("publish.worker_position"):
+        position_sync_notes = _sync_position_to_worker(state_ok)
     # Entry and position management are opt-in and live-gated inside the
     # separate engine.  Disabled/default runs only emit a short note; they do
     # not query the broker or call order.py.
-    auto_notes = autotrade_engine.reconcile(bundle, state_ok=state_ok)
+    with cycle_timing.phase("publish.engine_reconcile"):
+        auto_notes = autotrade_engine.reconcile(bundle, state_ok=state_ok)
     # 戦績の自動記録。**reconcile の後**に置く —— 同じサイクルで engine が
     # 決済(FLATTEN)を送ったなら、その結果まで含めて観測できる。
     # 読むだけの経路なので、失敗しても監視サイクルは止めない。
-    auto_notes = list(auto_notes) + position_sync_notes + _record_closed_trades(bundle)
+    with cycle_timing.phase("publish.trade_journal"):
+        auto_notes = list(auto_notes) + position_sync_notes + _record_closed_trades(bundle)
 
     cfg = load_env()
     if state_ok:
@@ -2255,12 +2387,17 @@ def main():
     for note in (*state_notes, *strategy_notes, *auto_notes):
         print(f"    - {note}")
 
-    result = send(cfg, build_monitor_message(bundle, state_ok, auto_notes), reply_markup=keyboard)
+    with cycle_timing.phase("publish.telegram"):
+        result = send(cfg, build_monitor_message(bundle, state_ok, auto_notes),
+                      reply_markup=keyboard)
     if not result or not result.get("ok"):
         raise SystemExit(f"ERROR: Telegram send failed: {result}")
-    _send_scenario_card(cfg, bundle)
-    # 保有中のカードは「契約が変わった瞬間」だけ。詳細は _send_position_card。
-    _send_position_card(cfg, bundle)
+    with cycle_timing.phase("publish.cards"):
+        _send_scenario_card(cfg, bundle)
+        # 保有中のカードは「契約が変わった瞬間」だけ。詳細は _send_position_card。
+        _send_position_card(cfg, bundle)
+    # R118: 内訳を 1 行で親(nqx_cycle)へ渡す。
+    print(cycle_timing.emit())
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as fh:
         json.dump(bundle, fh, ensure_ascii=False, indent=2)

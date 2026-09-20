@@ -1240,6 +1240,42 @@ def _write_highwater(store):
     return True
 
 
+#: 残高の短命キャッシュ(R113, 2026-09-19)。秒。0 で無効。
+ACCOUNTS_BALANCE_TTL_SEC = float(os.environ.get("NQX_BALANCE_TTL_SEC") or 30.0)
+_BALANCE_CACHE = {"ids": None, "at": 0.0, "value": None}
+
+
+def _cached_balances(ids):
+    """口座残高を短命キャッシュ越しに取る(R113)。
+
+    `build_accounts_payload` は 1 サイクルに **3 回**呼ばれる(publish 本体 /
+    `_apply_ultra_prefs` / `publish_accounts`)。そのたびに 7 口座の残高を
+    叩いていたので、実測で **28 本 13.9 秒**が残高照会に消えていた。
+    数秒のあいだに 3 回読んでも同じ数字しか返らない。
+
+    **キャッシュしてよいのは残高だけ。** 建玉と注文は「今 FLAT か」を決める
+    安全ゲートなので、1 本たりともキャッシュしない(CLAUDE.md §6.1 の
+    「建玉ゼロと推測しない」はそのまま)。残高は残機の表示と ULTRA の枚数計算に
+    使う量で、数秒の遅れが判定を変えることは無い。
+
+    `NQX_BALANCE_TTL_SEC=0` で無効(毎回ブローカーへ行く)。
+    """
+    key = tuple(ids)
+    ttl = ACCOUNTS_BALANCE_TTL_SEC
+    now_mono = time.monotonic()
+    if (ttl > 0 and _BALANCE_CACHE["ids"] == key
+            and _BALANCE_CACHE["value"] is not None
+            and now_mono - _BALANCE_CACHE["at"] < ttl):
+        return _BALANCE_CACHE["value"]
+    try:
+        import broker_status
+        value = broker_status.query_balances(ids)
+    except Exception:  # noqa: BLE001 — 残高が取れなくても従来どおり手入力へ落ちる
+        value = {}
+    _BALANCE_CACHE.update({"ids": key, "at": now_mono, "value": value})
+    return value
+
+
 def build_accounts_payload(env=None, now=None, balances=None, roster=None, prefs=None):
     """口座別の残機(LIFELINE)を組み立てる。
 
@@ -1297,11 +1333,7 @@ def build_accounts_payload(env=None, now=None, balances=None, roster=None, prefs
     # ネットワーク往復を足さないための門。
     wants_live = any(env.get(f"TRAILING_DD_{a}") or env.get(f"FLOOR_{a}") for a in ids)
     if balances is None and wants_live:
-        try:
-            import broker_status
-            balances = broker_status.query_balances(ids)
-        except Exception:
-            balances = {}
+        balances = _cached_balances(ids)
     balances = balances if isinstance(balances, dict) else {}
 
     store = _read_highwater()
@@ -1938,7 +1970,9 @@ def sync_position(cfg=None, symbol=None):
 
     cfg = cfg or load_cloud_env()
     symbol = symbol or cfg.get("NQX_SYMBOL", contract_month.symbol())
-    result = broker_status.query_position(symbol)
+    # R114: Worker の position stream は表示用。サイクル先頭の一括照会を共有する
+    # (account=None は既定口座 = CROSSTRADE_ACCOUNTS の先頭で、鍵もそろう)。
+    result = broker_status.query_position_cached(symbol)
     # ブローカーは SL/TP を返さない。凍結プランの水準を重ねて publish する
     # (無ければ素通し。position_plan_overlay の docstring 参照)。
     overlay = position_plan_overlay(result)

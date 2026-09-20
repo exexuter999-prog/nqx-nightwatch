@@ -168,12 +168,19 @@ def sweep_cost(observation: Dict[str, Dict[str, Any]]) -> int:
     """1 回の見回りで打つ HTTP の本数の見積もり。建玉あり 1 本、FLAT・未検証は 2 本。
 
     FLAT は broker_status R41 の裏取り(``/positions`` 一覧)で 2 本目が走る。未検証は最悪側。
+
+    R118: Gateway(押し込み)から来た行は **0 本**。押し込みは上限の枠を消費しない
+    ので、口座が増えても見回りの間隔が伸びない。REST へ落ちた口座だけが従来どおり
+    数えられる —— 混在しても正しく効く。**全口座が Gateway 由来なら床は 0** で、
+    `next_delay` は `fastIntervalSec` そのものになる。
     """
     cost = 0
     for value in (observation or {}).values():
+        if str(value.get("source") or "") in PUSH_SOURCES:
+            continue
         is_open = value.get("verified") and int(value.get("qty") or 0) > 0
         cost += 1 if is_open else 2
-    return max(1, cost)
+    return cost
 
 
 def next_delay(settings: Dict[str, Any], observation: Dict[str, Dict[str, Any]],
@@ -273,8 +280,15 @@ def observe(symbol: str, accounts: List[str],
         except (TypeError, ValueError):
             qty = 0
         side = str(position.get("side") or "").upper() if qty > 0 else ""
-        out[account] = {"verified": True, "qty": qty, "side": side}
+        # R118: どこから読んだか。Gateway 由来の行は HTTP を使っていないので、
+        # 次の見回りの間隔(`sweep_cost`)に数えない。
+        out[account] = {"verified": True, "qty": qty, "side": side,
+                        "source": str(position.get("source") or "")}
     return out
+
+
+#: R118: この出所で来た観測は HTTP を使っていない(WebSocket の押し込み)。
+PUSH_SOURCES = ("gateway-ws",)
 
 
 def rate_limited(observation: Dict[str, Dict[str, Any]]) -> bool:
@@ -298,12 +312,24 @@ def changes(previous: Optional[Dict[str, Dict[str, Any]]],
 
 
 def merge_baseline(previous: Optional[Dict[str, Dict[str, Any]]],
-                   current: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """次回比較の基準。未検証だった口座は前回の verified 観測を保つ。"""
+                   current: Dict[str, Dict[str, Any]],
+                   accounts: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+    """次回比較の基準。未検証だった口座は前回の verified 観測を保つ。
+
+    R118: `source` も持ち越す。heartbeat に載るのはこの基準なので、落とすと
+    **どの出所で観測しているかが外から一切見えない**(2026-09-20、mode=LIVE に
+    したのに heartbeat の出所が空のままで、効いていないように見えた)。
+    `accounts` を渡すと、**監視対象から外れた口座の行を落とす** —— 口座を入れ替えた
+    あと、消えた口座が基準に残り続けて heartbeat の口座数が合わなくなる。
+    """
     baseline = dict(previous or {})
     for account, cur in current.items():
         if cur.get("verified"):
-            baseline[account] = {"verified": True, "qty": cur.get("qty"), "side": cur.get("side")}
+            baseline[account] = {"verified": True, "qty": cur.get("qty"),
+                                 "side": cur.get("side"), "source": cur.get("source") or ""}
+    if accounts is not None:
+        keep = {str(value) for value in accounts}
+        baseline = {name: row for name, row in baseline.items() if name in keep}
     return baseline
 
 
@@ -483,7 +509,7 @@ def run(*, symbol: str, accounts: List[str], interval: float,
                 log(f"  - {note}")
             last_trigger = {"at": _iso_now(), "reason": reason, "notes": notes[-8:]}
             last_manage_at = time.monotonic()
-        baseline = merge_baseline(baseline, current)
+        baseline = merge_baseline(baseline, current, accounts)
         errors = errors + 1 if unverified and len(unverified) == len(current) else 0
         # 次の見回りの本数は「今の」建玉で決まる(未検証の口座は最悪側の 2 本)。
         delay, mode = next_delay(pace, {a: current.get(a) or {} for a in accounts}, errors, limited)
@@ -631,12 +657,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         instance.release()
         return 1
     reconcile_lock = Path(ae.LEDGER_FILE + ".lock")
+    # R118: 観測の出所。OFF なら従来どおり REST を直接叩く(1 行も挙動が変わらない)。
+    # SHADOW / LIVE では broker_source が口座ごとに Gateway か REST かを決める。
+    # **Gateway が死んでいる口座は REST へ落ちる**ので、検知に穴は空かない。
+    import broker_source
+    source_mode = broker_source.mode()
+    if source_mode == broker_source.OFF:
+        position_query = broker_status.query_position
+    else:
+        position_query = broker_source.observation_position
     print(f"fill_watch: {symbol} accounts={len(accounts)} fast={settings['fastIntervalSec']:g}s "
           f"idle={settings['idleIntervalSec']:g}s max_rps={settings['maxRequestsPerSec']:g} "
-          f"manage_every={args.manage_every:g}s started_by={args.started_by} heartbeat={HEARTBEAT_PATH}")
+          f"manage_every={args.manage_every:g}s started_by={args.started_by} "
+          f"source={source_mode} heartbeat={HEARTBEAT_PATH}")
     try:
         return run(symbol=symbol, accounts=accounts, interval=settings["idleIntervalSec"],
-                   position_query=broker_status.query_position, reconcile=ae.reconcile,
+                   position_query=position_query, reconcile=ae.reconcile,
                    price_query=ae._default_fresh_price_query,
                    sync_position=nqx_state.sync_position,
                    manage_every=max(0.0, args.manage_every), once=args.once,
