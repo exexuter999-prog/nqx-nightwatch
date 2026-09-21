@@ -116,6 +116,16 @@ def _live_broker_reads():
         yield
 
 
+def _release_stale_entry_claim(claim_view: Any, journal: Any) -> Tuple[bool, Any]:
+    """R123: 全口座 FLAT を確かめた古い claim の解放を DO に頼む。失敗は周期を止めない。"""
+    try:
+        import nqx_state
+        return nqx_state.release_entry_claim(
+            (claim_view or {}).get("entryKey"), (journal or {}).get("claimToken"))
+    except Exception as exc:  # noqa: BLE001 — 解放は CLAIM 時にもう一度機会がある
+        return False, {"reason": f"{type(exc).__name__}: {exc}"}
+
+
 def _claim_scope_all_flat(claim_view: Any, symbol: str) -> bool:
     """claim の accountScope **全口座** が verified FLAT で、blocking 注文が無いか(R116)。
 
@@ -4529,35 +4539,48 @@ def _reconcile_one(bundle: Dict[str, Any], state_ok: bool = True,
             # DO は観測イベントの中で claim を解放する(R112)。すると続く RECOVER は相手が
             # 居らず `ENTRY_CLAIM_TOKEN_INVALID` で 409 になる —— **望んだ結果が出ているのに
             # 失敗として blocked を返していた**。正本を読み直し、枠が実際に空いていれば進む。
-            if not deferrable:
-                try:
-                    import nqx_state
-                    fresh = state_query() if state_query is not None else nqx_state.fetch_state_quiet()
-                except Exception:  # noqa: BLE001 — 読めなければ従来どおり止める
-                    fresh = None
-                fresh_claim = fresh.get("entryClaim") if isinstance(fresh, dict) else None
-                released = (isinstance(fresh, dict)
-                            and (fresh_claim is None
-                                 or str((fresh_claim or {}).get("entryKey") or "")
-                                 != str(claim_view.get("entryKey") or "")))
-                if released:
-                    detail = {"released": True, "reason": "ENTRY_CLAIM_RELEASED_BY_DO",
-                              "recoverResult": detail}
-                    deferrable = True
-                # R116(2026-09-19): 多口座 claim は DO の RECOVER 証明を構造的に通せない
-                # (1 回の観測で全 receipt を照合する設計)。DO が stale release 可と言い
-                # (`staleReleasable`)、かつ engine が **全口座** の不在(verified FLAT・
-                # blocking 注文なし)を自分の観測で確かめたときだけ CLAIM へ委ねる。
-                # engine は何も解放しない —— 解放は CLAIM 時に DO が自分でやる。
-                # 2026-09-19 01:50 の 7 口座 ENTRY(受理 14/14・約定 0)がこれで
-                # 2 時間以上 RECOVERY_UNVERIFIED のまま新規を塞いだ。
-                elif (isinstance(fresh_claim, dict)
-                      and str(fresh_claim.get("entryKey") or "") == str(claim_view.get("entryKey") or "")
-                      and fresh_claim.get("staleReleasable") is True
-                      and _claim_scope_all_flat(claim_view, _claim_recovery_symbol(claim_view, symbol))):
-                    detail = {"released": False, "reason": "ENTRY_CLAIM_STALE_RELEASABLE_ALL_FLAT",
-                              "recoverResult": detail}
-                    deferrable = True
+            # 正本を読み直す。R112 の解放の確認と、R116 / R123 の全口座 FLAT 判定の両方に使う。
+            # R123: R40 / R53 / R69 で先に「委ねる」と決まった周期もここを通す —— そちらを
+            # 読まずにいたため、identity 解決不能(R53)の 7 口座 claim が 09-18 から 2 日半残った。
+            try:
+                import nqx_state
+                fresh = state_query() if state_query is not None else nqx_state.fetch_state_quiet()
+            except Exception:  # noqa: BLE001 — 読めなければ従来どおり止める
+                fresh = None
+            fresh_claim = fresh.get("entryClaim") if isinstance(fresh, dict) else None
+            same_claim = (isinstance(fresh_claim, dict)
+                          and str(fresh_claim.get("entryKey") or "") == str(claim_view.get("entryKey") or ""))
+            # R116(2026-09-19): 多口座 claim は DO の RECOVER 証明を構造的に通せない
+            # (1 回の観測で全 receipt を照合する設計)。DO が stale release 可と言い
+            # (`staleReleasable`)、かつ engine が **全口座** の不在(verified FLAT・
+            # blocking 注文なし)を自分の観測で確かめたときだけ解放へ進む。
+            # 2026-09-19 01:50 の 7 口座 ENTRY(受理 14/14・約定 0)がこれで
+            # 2 時間以上 RECOVERY_UNVERIFIED のまま新規を塞いだ。
+            stale_all_flat = (same_claim and fresh_claim.get("staleReleasable") is True
+                              and _claim_scope_all_flat(claim_view, _claim_recovery_symbol(claim_view, symbol)))
+            # R112(2026-09-19): DO 側が **この recover の最中に** claim を捨てていることがある。
+            # `_recover_entry_from_current_broker` は不在の証明を publish してから RECOVER を
+            # 呼ぶが、その publish 自体が「消費できない claim + ブローカー空」の条件を満たすと
+            # DO は観測イベントの中で claim を解放する(R112)。すると続く RECOVER は相手が
+            # 居らず `ENTRY_CLAIM_TOKEN_INVALID` で 409 になる —— **望んだ結果が出ているのに
+            # 失敗として blocked を返していた**。正本を読み直し、枠が実際に空いていれば進む。
+            if not deferrable and isinstance(fresh, dict) and not same_claim:
+                detail = {"released": True, "reason": "ENTRY_CLAIM_RELEASED_BY_DO",
+                          "recoverResult": detail}
+                deferrable = True
+            elif stale_all_flat:
+                detail = {"released": False, "reason": "ENTRY_CLAIM_STALE_RELEASABLE_ALL_FLAT",
+                          "recoverResult": detail}
+                # R123(2026-09-21): 次の ARMED を待たずに、ここで DO に解放を頼む。委ねるだけ
+                # だと枠はトレード後も残り、Mini App は STALE SLOT を出し続けた。DO は CLAIM 時と
+                # 同じ判定を自分で再検証する。拒否されても従来どおり CLAIM 時の解放が残る。
+                released_ok, release_detail = _release_stale_entry_claim(claim_view, journal)
+                if released_ok:
+                    detail = {**detail, "released": True,
+                              "reason": "ENTRY_CLAIM_RELEASED_ALL_FLAT"}
+                else:
+                    detail = {**detail, "releaseResult": release_detail}
+                deferrable = True
             if not deferrable:
                 return [f"autotrade blocked: ENTRY startup recovery failed ({detail})"]
         recovered_row = {"key": claim_view.get("entryKey"), "entryKey": claim_view.get("entryKey"),

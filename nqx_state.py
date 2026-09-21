@@ -927,6 +927,18 @@ def recover_entry_claim(entry_key_value, claim_token, broker_snapshot,
     }, cfg)
 
 
+def release_entry_claim(entry_key_value, claim_token, cfg=None, publish_fn=None):
+    """R123: 全口座 FLAT を engine が確かめた古い claim の解放を DO に頼む。
+
+    DO は CLAIM 時と同じ stale release の判定を自分で再検証する(engine は何も宣言しない)。
+    """
+    sender = publish_fn or publish
+    return sender("entry_claim", {
+        "action": "RELEASE", "entryKey": str(entry_key_value),
+        "claimTokenHash": _claim_token_hash(claim_token),
+    }, cfg)
+
+
 def claim_management(intent_value, cfg=None, publish_fn=None):
     """Acquire the account-scoped Durable Object CAS for one MODIFY intent."""
     intent = management_intent.normalize(intent_value)

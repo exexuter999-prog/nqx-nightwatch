@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   evaluateExecutionContract, ultraSplit, validateScenario,
 } from "../src/state_machine.js";
+import executionContract from "../../execution_contract.json" with { type: "json" };
 
 const T0 = Date.parse("2026-08-28T14:00:00Z");
 const MIN = 60_000;
@@ -83,12 +84,34 @@ test("残DDを超える枚数は RISK_CAP_EXCEEDED", () => {
   assert.ok(contract.blockers.includes("RISK_CAP_EXCEEDED"));
 });
 
-test("凍結スコープが1口座でなければ ULTRA_SCOPE_NOT_SINGLE", () => {
+// R109(2026-09-18): ULTRA は複数口座で張れる。弾くのは 0 口座と ultra.maxAccounts 超えだけ。
+test("複数口座の凍結スコープは scope で弾かれない", () => {
   const checked = validateScenario(ultraScenario({
     executionContract: { ...ULTRA_CONTRACT, accountScope: ["ACC-A1", "ACC-B2"] },
   }), { symbol: "MNQU6" });
   const contract = evaluateExecutionContract(checked.scenario, market, null, null, T0);
-  assert.ok(contract.blockers.includes("ULTRA_SCOPE_NOT_SINGLE"));
+  assert.ok(!contract.blockers.includes("ULTRA_SCOPE_OUT_OF_ENVELOPE"),
+    JSON.stringify(contract.blockers));
+});
+
+test("上限を超えた口座数は ULTRA_SCOPE_OUT_OF_ENVELOPE", () => {
+  const max = Number(executionContract.ultra.maxAccounts);
+  const scope = Array.from({ length: max + 1 }, (_value, index) => `ACC-${index}`);
+  const checked = validateScenario(ultraScenario({
+    executionContract: { ...ULTRA_CONTRACT, accountScope: scope },
+  }), { symbol: "MNQU6" });
+  const contract = evaluateExecutionContract(checked.scenario, market, null, null, T0);
+  assert.ok(contract.blockers.includes("ULTRA_SCOPE_OUT_OF_ENVELOPE"),
+    JSON.stringify(contract.blockers));
+});
+
+test("口座ゼロの凍結スコープは ULTRA_SCOPE_OUT_OF_ENVELOPE", () => {
+  const checked = validateScenario(ultraScenario({
+    executionContract: { ...ULTRA_CONTRACT, accountScope: [] },
+  }), { symbol: "MNQU6" });
+  const contract = evaluateExecutionContract(checked.scenario, market, null, null, T0);
+  assert.ok(contract.blockers.includes("ULTRA_SCOPE_OUT_OF_ENVELOPE"),
+    JSON.stringify(contract.blockers));
 });
 
 test("エンベロープ外の枚数は ULTRA_QTY_OUT_OF_ENVELOPE", () => {

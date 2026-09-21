@@ -125,11 +125,15 @@ test("未消費の claim は maxAgeSec を過ぎ、空を証明できれば解�
   assert.ok(later - T0 < STALE_MS);
   const obs = observe(heartbeat(state, later, 3), later, intentHash, [], 4);
   assert.equal(obs.accepted, true, obs.reason || "observation rejected");
+  // R112(2026-09-19): 消費できない claim は **観測が届いたその場で**捨てる。
+  // CLAIM を待つと「次の新規 ENTRY」まで枠が空かない。
+  assert.equal(obs.state.entryClaim, null, "観測の時点で解放されるべき");
+  assert.equal(obs.state.entryStaleRelease?.entryKey, entryKey);
+  assert.equal(obs.state.entryStaleRelease?.reason, "UNCONSUMABLE_CLAIM_BROKER_EMPTY");
+  assert.match(obs.reason || "", /STALE_RELEASED/);
   const retry = reclaim(obs.state, payload, later, 5);
-  assert.equal(retry.accepted, true, retry.reason || "解放されるべき");
-  assert.match(retry.reason || "", /STALE_RELEASED/);
+  assert.equal(retry.accepted, true, retry.reason || "解放後は新規 claim が立つ");
   assert.equal(retry.state.entryClaim.state, "CLAIMED", "新しい claim が立つ");
-  assert.equal(retry.state.entryStaleRelease?.entryKey, entryKey);
 });
 
 test("未消費でも maxAgeSec 以内(まだ CONSUME できる)は解放しない", () => {

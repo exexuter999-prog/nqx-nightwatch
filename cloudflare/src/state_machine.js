@@ -303,9 +303,16 @@ export function evaluateExecutionContract(scenario, market, position, order, now
         || qty > Number(ultraEnv.maxQtyPerAccount) || ultraLegSplit === null) {
       blockers.push("ULTRA_QTY_OUT_OF_ENVELOPE");
     }
+    // R109(2026-09-18): ULTRA は複数口座で張れる。上限は契約の ultra.maxAccounts。
+    // intent は scope 全体で枚数を 1 つしか持たないので、producer は同じ利益目標の
+    // 口座だけを scope に入れ、riskCapDollars を残った口座の最小残ドローダウンで
+    // 凍結する。下の cap 判定はその凍結値を使うので、一番薄い口座が正本になる。
+    // execution_contract.evaluate(Python)の ULTRA_SCOPE_OUT_OF_ENVELOPE と鏡。
     const ultraScope = Array.isArray(scenario?.executionContract?.accountScope)
       ? scenario.executionContract.accountScope : [];
-    if (ultraScope.length !== 1) blockers.push("ULTRA_SCOPE_NOT_SINGLE");
+    if (!ultraScope.length || ultraScope.length > Number(ultraEnv.maxAccounts)) {
+      blockers.push("ULTRA_SCOPE_OUT_OF_ENVELOPE");
+    }
   } else if (!Number.isInteger(qty) || qty !== fixedQty) blockers.push("FIXED_QTY_REQUIRED");
   const split = executionContract.splitPlan || {};
   const targets = Array.isArray(scenario?.targets) ? scenario.targets : [];
@@ -1500,7 +1507,7 @@ export function validateOrder(raw) {
   };
 }
 
-const ENTRY_CLAIM_ACTIONS = new Set(["CLAIM", "CONSUME", "RESOLVE", "RECOVER"]);
+const ENTRY_CLAIM_ACTIONS = new Set(["CLAIM", "CONSUME", "RESOLVE", "RECOVER", "RELEASE"]);
 const ENTRY_CLAIM_ACTIVE = new Set(["CLAIMED", "CONSUMED"]);
 const ENTRY_CLAIM_LOCKING_RESULTS = new Set(["SENT", "PARTIAL", "UNKNOWN"]);
 
@@ -2177,6 +2184,32 @@ function applyEntryClaimEvent(state, event, revision, nowMs) {
 
   if (!claim || String(claim.entryKey) !== entryKey || claim.claimTokenHash !== tokenHash) {
     return reject("ENTRY_CLAIM_TOKEN_INVALID");
+  }
+  if (action === "RELEASE") {
+    // R123(2026-09-21): 古い claim を **次の CLAIM を待たずに**捨てる。
+    //
+    // 多口座の CONSUMED claim は RECOVER を構造的に通せない(1 回の観測で全 receipt を
+    // 照合する設計で、1 口座の観測に他口座の注文は載らない)。解放は次の ARMED の CLAIM
+    // 到達時だけで、トレードが終わるたびに枠が残り、Mini App は STALE SLOT を出し続けた。
+    //
+    // CLAIM 時の stale release と**同じ組**で判定する: engine が scope 全口座の verified
+    // FLAT・blocking 注文なしを自分で確かめ(R116 の _claim_scope_all_flat。CLAIM の前に
+    // やる全口座照会と同じ)、DO は CLAIM 時と同じ staleEntryClaimReleasable を再検証する。
+    // 条件は緩めない。token が一致しないと届かない(他人の claim は捨てられない)。
+    if (!ENTRY_CLAIM_ACTIVE.has(String(claim.state || ""))) return reject("ENTRY_CLAIM_NOT_ACTIVE");
+    if (!staleEntryClaimReleasable(state, claim, nowMs)) return reject("ENTRY_CLAIM_RELEASE_UNVERIFIED");
+    const from = String(claim.state);
+    const next = bump(state, "entry_claim", revision);
+    next.entryClaim = null;
+    next.entryRelease = null;
+    // 解放は必ず記録に残す。黙って解くと「なぜ枠が空いたのか」が後から追えない。
+    next.entryStaleRelease = {
+      entryKey, from, releasedAt: new Date(nowMs).toISOString(), revision,
+      reason: "ENGINE_SCOPE_ALL_FLAT",
+    };
+    return { state: next, accepted: true,
+      reason: `ENTRY_CLAIM_STALE_RELEASED: ${entryKey} (${from}, engine verified all accounts flat)`,
+      transitions: [{ kind: "entry_claim", from, to: "STALE_RELEASED", entryKey }] };
   }
   if (action === "CONSUME") {
     if (claim.state !== "CLAIMED") return reject("ENTRY_CLAIM_NOT_CLAIMED");
@@ -2976,8 +3009,27 @@ export function validateAccountPrefs(raw) {
     }
     map[id] = row;
   }
-  if (ultraCount > 1) {
-    return { ok: false, reason: "ULTRA can be enabled for at most one account (claim scope)" };
+  // R109(2026-09-18): ULTRA は複数口座で張れる。上限は契約の ultra.maxAccounts。
+  const maxUltra = Number(executionContract.ultra?.maxAccounts) || 1;
+  if (ultraCount > maxUltra) {
+    return { ok: false,
+      reason: `ULTRA can be enabled for at most ${maxUltra} account${maxUltra === 1 ? "" : "s"}` };
+  }
+  // R109: execution intent は scope 全体で枚数を 1 つしか持たない。ULTRA の枚数は
+  // 「その口座の利益目標に届く枚数」なので、目標が割れた口座を同時に選ぶと必ず
+  // どれかが目標に届かない。monitor_publish._apply_ultra_prefs は publish 前に
+  // WATCH へ落とすが、それでは「設定したのに出ない」になるので保存時に弾く。
+  const ultraTargets = Object.entries(map)
+    .filter(([, row]) => row.ultra === true)
+    .map(([id, row]) => [id, row.profitTarget]);
+  const blankTarget = ultraTargets.find(([, target]) => !(Number(target) > 0));
+  if (blankTarget) {
+    return { ok: false,
+      reason: `ULTRA account …${blankTarget[0].slice(-6)} needs a profit target` };
+  }
+  if (new Set(ultraTargets.map(([, target]) => target)).size > 1) {
+    return { ok: false,
+      reason: "ULTRA accounts must share one profit target" };
   }
   return { ok: true, map };
 }
@@ -3135,9 +3187,53 @@ function applyBrokerObservationEvent(state, event, revision, nowMs) {
   }
   const next = bump(state, "broker_observation", revision);
   next.brokerObservation = { ...checked.observation, revision };
-  return { state: next, accepted: true, reason: null,
-    transitions: [{ kind: "broker_observation", from: state.brokerObservation?.observedAt || null,
-      to: checked.observation.observedAt }] };
+  const transitions = [{ kind: "broker_observation",
+    from: state.brokerObservation?.observedAt || null,
+    to: checked.observation.observedAt }];
+
+  // R112(2026-09-19): **消費できなくなった** claim を、不在の証明が届いたその場で捨てる。
+  //
+  // CONSUME は claim.maxAgeSec(180 秒)を過ぎると必ず ENTRY_CLAIM_EXPIRED で拒否される
+  // (上の applyEntryClaimEvent)。つまり `CLAIMED` かつ試行 0 のまま 180 秒を過ぎた claim は
+  // **注文を生む経路が構造的に存在しない**ただの枠の占有である。ところが解放は
+  //   * CLAIM 到達時の stale release —— 次の新規 ENTRY が来るまで走らない
+  //   * RECOVER —— entryRecoveryProof は snapshot CAS と per-order 終端証明を要求するので、
+  //     一度も送っていない claim では原理的に通らず 409 ENTRY_CLAIM_RECOVERY_UNVERIFIED
+  // の 2 つしか無い。2026-09-18 22:40 の claim は CONSUME が ENTRY_CLAIM_MARKET_PRICE_STALE で
+  // 落ちたあと 2 時間 45 分残り、engine が毎周期 RECOVER を試して台帳に ENTRY_RECOVERED を
+  // 168 行積んだ。Mini App の ENGINE は観測の鮮度しだいで RESERVED と STALE SLOT を往復する。
+  //
+  // 不在の証明はまさにこの観測が運んでくる(建玉 0・未終端注文なし・口座と銘柄が一致・
+  // claim が古い)。判定は CLAIM 側とまったく同じ `staleEntryClaimReleasable` を使い、
+  // 条件は緩めない。**「消費できない」ことを独立に確かめた claim にだけ**当てるので、
+  // 送信済み(CONSUMED)や生きている claim には触れない —— そちらは従来どおり
+  // CLAIM 時の stale release と RECOVER が扱う。
+  const claim = next.entryClaim;
+  const consumeWindowSec = Number(executionContract.claim?.maxAgeSec);
+  const claimedAt = parseInstant(claim?.claimedAt);
+  const unconsumable = Boolean(claim
+    && String(claim.state || "") === "CLAIMED"
+    && Number(claim.totalAttempts || 0) === 0
+    && Number.isFinite(consumeWindowSec) && consumeWindowSec > 0
+    && claimedAt !== null && nowMs - claimedAt > consumeWindowSec * 1000);
+  if (unconsumable && staleEntryClaimReleasable(next, claim, nowMs)) {
+    const entryKey = String(claim.entryKey || "");
+    // 解放は必ず記録に残す。黙って解くと「なぜ枠が空いたのか」が後から追えない。
+    next.revisions = { ...next.revisions, entry_claim: revision };
+    next.entryClaim = null;
+    next.entryRelease = null;
+    next.entryStaleRelease = {
+      entryKey, from: "CLAIMED", releasedAt: new Date(nowMs).toISOString(), revision,
+      reason: "UNCONSUMABLE_CLAIM_BROKER_EMPTY",
+    };
+    transitions.push({ kind: "entry_claim", from: "CLAIMED", to: "STALE_RELEASED", entryKey });
+    return {
+      state: next, accepted: true,
+      reason: `ENTRY_CLAIM_STALE_RELEASED: ${entryKey} (CLAIMED, unconsumable + broker empty)`,
+      transitions,
+    };
+  }
+  return { state: next, accepted: true, reason: null, transitions };
 }
 
 function applyScenarioEvent(state, event, revision, nowMs) {
@@ -3413,6 +3509,40 @@ function applyAccountEvent(state, event, revision, nowMs) {
 
   const next = bump(state, "account", revision);
   next.accounts = { ...validated.accounts, revision, publishedAt: new Date(nowMs).toISOString() };
+
+  // R110(2026-09-18): 名簿が「claim の scope はブローカーに居ない」と証明した周期で、
+  // その場で古い claim を捨てる。
+  //
+  // R69 の stale release は **CLAIM 到達時にしか走らない**。口座が入れ替わると旧口座の
+  // claim は「次の新規 ENTRY」まで残り、Mini App の SYSTEM タブは STALE SLOT (WARN) を
+  // 出し続ける。「it clears on the next entry」と書いてあるのに、新規が来るまで何時間でも
+  // 居座る(2026-09-18 実測: 09-17 06:13 の claim が口座入替後も翌日まで残った)。
+  // 消えた口座を指す claim は不在を証明済みのゴミなので、**証拠が届いたその場で**捨てる。
+  //
+  // 判定は CLAIM 側と同じ predicate を使い、条件は緩めない。さらに解放理由を
+  // 「scope が消えた」に限定する —— staleEntryClaimReleasable は新鮮な観測でも true を
+  // 返すが、そちらは CLAIM 側で扱う話で、名簿が運んでくる証拠ではない。
+  const claim = next.entryClaim;
+  if (claim && ENTRY_CLAIM_ACTIVE.has(String(claim.state || ""))
+      && claimScopeVanishedFromBroker(next, claim, nowMs)
+      && staleEntryClaimReleasable(next, claim, nowMs)) {
+    const from = String(claim.state);
+    const entryKey = String(claim.entryKey || "");
+    // 解放は必ず記録に残す。黙って解くと「なぜ消えたのか」が後から追えない。
+    next.revisions = { ...next.revisions, entry_claim: revision };
+    next.entryClaim = null;
+    next.entryRelease = null;
+    next.entryStaleRelease = {
+      entryKey, from, releasedAt: new Date(nowMs).toISOString(), revision,
+      reason: "SCOPE_VANISHED_FROM_BROKER",
+    };
+    transitions.push({ kind: "entry_claim", from, to: "STALE_RELEASED", entryKey });
+    return {
+      state: next, accepted: true,
+      reason: `ENTRY_CLAIM_STALE_RELEASED: ${entryKey} (${from}, scope vanished from broker)`,
+      transitions,
+    };
+  }
   return { state: next, accepted: true, reason: null, transitions };
 }
 

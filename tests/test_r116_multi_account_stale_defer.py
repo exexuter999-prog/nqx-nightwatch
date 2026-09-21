@@ -154,6 +154,28 @@ check("同じ entryKey の claim にだけ効く",
 check("理由が台帳に残る", "ENTRY_CLAIM_STALE_RELEASABLE_ALL_FLAT" in src)
 
 print("=" * 68)
+print("4. R123: 委譲と同じ周期で DO に RELEASE を頼む")
+print("=" * 68)
+check("R116 の分岐で解放を頼む", "_release_stale_entry_claim(claim_view, journal)" in src)
+import nqx_state  # noqa: E402
+sent = []
+ok, _ = nqx_state.release_entry_claim(
+    "ENTRY:multi", "t" * 43, publish_fn=lambda stream, payload, cfg: (sent.append((stream, payload)) or (True, {})))
+check("entry_claim ストリームへ RELEASE を送る",
+      ok and sent and sent[0][0] == "entry_claim" and sent[0][1]["action"] == "RELEASE"
+      and sent[0][1]["entryKey"] == "ENTRY:multi", str(sent))
+check("token は平文でなくハッシュで送る",
+      sent and sent[0][1]["claimTokenHash"] == nqx_state._claim_token_hash("t" * 43)
+      and "t" * 43 not in str(sent[0][1].values()), str(sent))
+original_release = nqx_state.release_entry_claim
+def boom(*args, **kwargs):
+    raise RuntimeError("network down")
+nqx_state.release_entry_claim = boom
+ok, detail = ae._release_stale_entry_claim({"entryKey": "ENTRY:multi"}, {"claimToken": "tok"})
+check("送信の例外は周期を止めない(False で返る)", ok is False and "network down" in str(detail))
+nqx_state.release_entry_claim = original_release
+
+print("=" * 68)
 if FAIL[0]:
     print(f"FAILED {FAIL[0]} / {PASS[0] + FAIL[0]}")
     sys.exit(1)

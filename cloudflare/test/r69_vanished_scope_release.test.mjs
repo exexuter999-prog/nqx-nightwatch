@@ -108,13 +108,17 @@ function retryClaim(state, payload, nowMs, revision) {
 test("scope の口座が名簿から消えていれば、古い claim は観測なしで解放される", () => {
   const { state, payload, entryKey } = strandedClaim();
   const later = T0 + STALE_MS + 60_000;
-  const withRoster = roster(heartbeat(state, later, 3), later, 4);
-  assert.equal(claimScopeVanishedFromBroker(withRoster, withRoster.entryClaim, later), true);
+  const beat = heartbeat(state, later, 3);
+  const stranded = beat.entryClaim;           // 名簿が載る前の claim
+  const withRoster = roster(beat, later, 4);
+  assert.equal(claimScopeVanishedFromBroker(withRoster, stranded, later), true);
+  // R110(2026-09-18): 証拠(名簿)が届いたその場で解放する。CLAIM を待たない。
+  assert.equal(withRoster.entryClaim, null, "名簿 publish で解放されるべき");
+  assert.equal(withRoster.entryStaleRelease?.entryKey, entryKey, "解放が記録される");
+  assert.equal(withRoster.entryStaleRelease?.reason, "SCOPE_VANISHED_FROM_BROKER");
   const retry = retryClaim(withRoster, payload, later, 5);
-  assert.equal(retry.accepted, true, retry.reason || "解放されるべき");
-  assert.match(retry.reason || "", /STALE_RELEASED/);
+  assert.equal(retry.accepted, true, retry.reason || "解放後は新規 claim が立つ");
   assert.equal(retry.state.entryClaim.state, "CLAIMED", "新しい claim が立つ");
-  assert.equal(retry.state.entryStaleRelease?.entryKey, entryKey, "解放が記録される");
 });
 
 test("scope の口座が名簿に居る(broker-only)なら従来どおり観測を要求する", () => {
@@ -138,9 +142,13 @@ test("scope の口座が configured で missing でなければ名簿は「居�
 test("configured でも missing(ブローカーに無い)なら消えた扱いで解放する", () => {
   const { state, payload } = strandedClaim();
   const later = T0 + STALE_MS + 60_000;
-  const withRoster = roster(heartbeat(state, later, 3), later, 4,
+  const beat = heartbeat(state, later, 3);
+  const stranded = beat.entryClaim;
+  const withRoster = roster(beat, later, 4,
     { list: [OLD_ACCOUNT], missing: [OLD_ACCOUNT], unknown: [NEW_ACCOUNT] });
-  assert.equal(claimScopeVanishedFromBroker(withRoster, withRoster.entryClaim, later), true);
+  assert.equal(claimScopeVanishedFromBroker(withRoster, stranded, later), true);
+  // R110: ここも名簿 publish の時点で解放される。
+  assert.equal(withRoster.entryClaim, null, "missing の口座は名簿 publish で解放される");
   assert.equal(retryClaim(withRoster, payload, later, 5).accepted, true);
 });
 
