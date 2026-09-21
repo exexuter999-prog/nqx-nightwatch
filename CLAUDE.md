@@ -167,6 +167,15 @@ ICT 入力を記録し、「評価して効かなかった」と「入力が無�
   `python verify_r122_live.py` / `python tests/test_r122_structure_context.py` /
   `python replay_structure_context.py --replay [--bars15m]`(読むだけ)。戻しは各段の `mode` を
   `OFF` にする 1 語。
+- **上位足の目標穴埋め(R124, 2026-09-21 ユーザー決定で LIVE・SHADOW 省略)**: 設定は
+  `execution_contract.json` の `htfTargets`、実装は `htf_targets.py` + `msnr_gate.model_targets`、
+  根拠は `docs/R124_HTF_TARGET_FILL.md`。利確目標が 2 本揃わない候補**だけ**に、確定した上位足の水準
+  (前日高安・前週高安・未回収の日足スイング・1h/4h の 20 本レンジ高安。ラベル `HTF …`)を目標候補として
+  足して引き直す。揃っている候補の目標・Entry・SL・枚数・decisionId は変えない(常に足す形は再生で悪化)。
+  水準マップ(セットアップ検出・SL 逃がし)には入れない。逐次再生 ΣR +10.19 → +14.38(1 tick)・
+  最大 DD −3.16 → −2.05 だが**有意ではない**(新規 5 件依存)。穴埋めで TP1 ≥ 5R になる BREAKER は
+  未検証(TP1 まで建値移動が掛からない)。検証は `python tests/test_r124_htf_targets.py` /
+  `python replay_htf_targets.py`(読むだけ)。戻しは `mode` を `OFF` にする 1 語。
 - **指値の門(R119, 2026-09-19 ユーザー決定)**: 設定は `execution_contract.json` の `limitGate`、根拠は
   `docs/R119_LIMIT_GATE.md`。**新規武装だけ**に掛かる 2 門で、保有建玉の管理(MODIFY / FLATTEN /
   追撃)は読まない。(1) `gapCap`(**LIVE / maxGapR 1.5**): 発注時に LIMIT になる候補で

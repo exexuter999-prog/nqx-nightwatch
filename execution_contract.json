@@ -255,6 +255,11 @@
       "maxAgeBars": 120
     }
   },
+  "htfTargets": {
+    "_note": "R124(2026-09-21 ユーザー決定で LIVE、SHADOW は省略。docs/R124_HTF_TARGET_FILL.md): 利確目標が 2 本揃わない候補にだけ、確定した上位足の水準(前日高安・前週高安・未回収の日足スイング・1h/4h の 20 本レンジ高安)を目標候補として足して引き直す。揃っている候補の目標・Entry・SL・枚数・decisionId は変えない。mode は OFF / LIVE。戻しは mode を OFF にする 1 語。",
+    "mode": "LIVE",
+    "sources": ["PREV_DAY", "PREV_WEEK", "DAILY_SWING", "RANGE20_1H", "RANGE20_4H"]
+  },
   "limitGate": {
     "_note": "R119(2026-09-19, docs/R119_LIMIT_GATE.md): **新規武装だけ**に掛かる 2 つの門。保有建玉の管理(凍結プランの MODIFY / FLATTEN / 追撃)はこの節を一切読まない。gapCap: 発注時に LIMIT になる候補(建値が現値の先)について |現値-建値|/リスク幅 = gapR が maxGapR を超えたら primary に選ばない。MARKET になる候補(建値が現値を通過している)には掛けない —— 指値専用の向き判定で成行候補を落とさないため、判定は autotrade_engine._entry_order_type と同じ式を使う。targetPassed: 現値が既に TP1 に到達/通過している候補を新規武装しない(BUY は 現値 >= tp1、SELL は 現値 <= tp1。向きを区別する)。どちらも鮮度確認済みの現値(bundle.price と priceAt が scenario.maxAgeSec 以内)でだけ判定し、確認できない周期は掛けずに理由を limitGate.reason に残す(相場データの古さは pipeline が先に BLOCK する)。mode: OFF / SHADOW=記録のみ / LIVE=primary から外す(hardBlockers に LIMIT_GAP_EXCEEDED / TARGET_ALREADY_PASSED を付けて WATCH。別モデルが primary になれる)。SL も建値も書き換えないので decisionId は変わらない。書き換えたら python tests/test_r119_limit_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
     "version": "R119-LIMIT-GATE-1",

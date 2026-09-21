@@ -36,6 +36,8 @@ import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 
+import contextvars
+import htf_targets
 import liquidity_pools
 import strategy_models
 
@@ -2226,7 +2228,25 @@ def target_pool(entry, stop, side, levels, ict, min_r=MODEL_MIN_R, extra=None):
     return pool
 
 
+#: R124: この evaluate() の周期で目標不足を埋める上位足の水準(LIVE のときだけ中身が入る)。
+#: evaluate() が入口で積み、出口で必ず戻す。evaluate の外(単体の呼び出し)では空 = R124 以前。
+_HTF_FILL = contextvars.ContextVar("htf_target_fill", default=())
+
+
 def model_targets(entry, stop, side, levels, ict, min_r=MODEL_MIN_R, preferred=None, extra=None):
+    """TP1 / runner の 2 本か 0 本。R124: 揃わないときだけ上位足の水準で引き直す。
+
+    揃っている候補には触れない(常に足すと runner が遠くへ動き、再生で悪化した)。
+    """
+    targets = _ladder_targets(entry, stop, side, levels, ict, min_r, preferred, extra)
+    fill = _HTF_FILL.get()
+    if targets or not fill:
+        return targets
+    return _ladder_targets(entry, stop, side, levels, ict, min_r, preferred,
+                           list(extra or ()) + list(fill))
+
+
+def _ladder_targets(entry, stop, side, levels, ict, min_r=MODEL_MIN_R, preferred=None, extra=None):
     """TP1 = 最も近い到達可能目標 / RUNNER = 最も遠い「質のある」目標。2本か0本。
 
     DOL は「最優先で選ぶ」が「先頭に置く」ではない。先頭に置くと TP1 が
@@ -4373,6 +4393,15 @@ def _advisory_tail(result):
 
 def evaluate(bundle, prm=None):
     """bundle 1つを判定して出力辞書を返す(純粋関数・副作用なし)。"""
+    # R124: 目標不足の穴埋め水準はこの周期の bundle からだけ作り、判定の間だけ有効にする。
+    token = _HTF_FILL.set(tuple(htf_targets.fill_for(bundle)))
+    try:
+        return _evaluate(bundle, prm)
+    finally:
+        _HTF_FILL.reset(token)
+
+
+def _evaluate(bundle, prm=None):
     prm = prm or params()
     # R45: VWAP のアンカーは**セッション開始(ET 18:00)**。走査は末尾
     # WINDOW_BARS 本。両者は同じ末尾で終わるのでスライスの長さを揃えれば
