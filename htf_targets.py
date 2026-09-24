@@ -26,7 +26,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-CONTRACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "execution_contract.json")
+CONTRACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json"))  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
 MODES = ("OFF", "LIVE")
 SOURCES = ("PREV_DAY", "PREV_WEEK", "DAILY_SWING", "RANGE20_1H", "RANGE20_4H")
 #: 目標ラベルの接頭辞。level_tier は正規表現の search なので、階層(Weekly=1 / Prev Day=2)は

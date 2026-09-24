@@ -3436,7 +3436,7 @@ def decision_context(bundle, ict, target_labels=None):
 #: ALL = そのモデルの候補すべて / RESTING_LIMIT = MSS 確認後にレベルへ先回りする指値(restingLimit)だけ。
 MODEL_GATE_VARIANTS = ("ALL", "RESTING_LIMIT")
 MODEL_GATE_BLOCKERS = {"ALL": "MODEL_DISABLED", "RESTING_LIMIT": "RESTING_LIMIT_DISABLED"}
-CONTRACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "execution_contract.json")
+CONTRACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json"))  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
 
 
 def model_gate_rules(contract=None):

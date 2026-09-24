@@ -65,7 +65,7 @@ DEFAULT_MAX_AGE_SEC = 30.0
 #: そのたびに 20KB の JSON を parse していた(観測 1 回 60〜107ms の一因)。
 _CONTRACT_CACHE: Dict[str, Any] = {"mtime": None, "size": None, "value": None}
 _CONTRACT_LOCK = threading.Lock()
-CONTRACT_PATH = os.path.join(BASE, "execution_contract.json")
+CONTRACT_PATH = os.path.join(BASE, os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json"))  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
 
 
 def _contract_file() -> Dict[str, Any]:

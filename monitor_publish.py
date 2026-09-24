@@ -1312,6 +1312,15 @@ def lifeline_total():
     return sum(item["buffer"] for item in payload["list"])
 
 
+def _nerf_tag():
+    """🩹 Nerf Edition: ナーフ契約で走っている周期だけ先頭に印(NERF.md)。試験・道具では空。"""
+    try:
+        import nerf
+        return nerf.TAG if nerf.active() else ""
+    except Exception:  # noqa: BLE001 — 印のために通知を止めない
+        return ""
+
+
 def build_headline(bundle, chosen, orders, state_ok=True, gate=None):
     """通知バナーに出る先頭 2 行。ここだけで状況が分かることを最優先にする。
 
@@ -1337,15 +1346,15 @@ def build_headline(bundle, chosen, orders, state_ok=True, gate=None):
         target = _number(chosen.get("target"))
         armed = "発注可" if state_ok else "⚠発注不可(正本未更新)"
         first = (
-            f"⚡MNQ {side} {entry:,.2f} → {target:,.2f} · SL {stop:,.2f} · {armed}"
+            f"{_nerf_tag()}⚡MNQ {side} {entry:,.2f} → {target:,.2f} · SL {stop:,.2f} · {armed}"
             if None not in (entry, stop, target)
-            else f"⚡MNQ {side} シナリオ {state} · {armed}"
+            else f"{_nerf_tag()}⚡MNQ {side} シナリオ {state} · {armed}"
         )
     else:
         change = _number(bundle.get("change"))
         arrow = "・" if not change else ("▲" if change > 0 else "▼")
         move = f" {arrow}{change:+,.0f}" if change else ""
-        head = f"MNQ {price:,.2f}{move}" if price is not None else "MNQ 価格取得不可"
+        head = f"{_nerf_tag()}MNQ {price:,.2f}{move}" if price is not None else f"{_nerf_tag()}MNQ 価格取得不可"
         zone = describe_zone(
             price,
             bundle.get("vwap", snapshot.get("vwap")),

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(BASE, "execution_contract.json"), encoding="utf-8") as _fh:
+with open(os.path.join(BASE, os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json")), encoding="utf-8") as _fh:  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
     CONTRACT: Dict[str, Any] = json.load(_fh)
 
 VERSION = str(CONTRACT["version"])

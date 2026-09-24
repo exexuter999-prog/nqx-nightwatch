@@ -59,7 +59,7 @@ _MIN_SLEEP_SEC = 0.001
 
 def config() -> Dict[str, Any]:
     try:
-        with io.open(os.path.join(BASE, "execution_contract.json"), encoding="utf-8") as fh:
+        with io.open(os.path.join(BASE, os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json")), encoding="utf-8") as fh:  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
             data = json.load(fh)
         section = ((data.get("gateway") or {}).get("coordinator") or {})
         return section if isinstance(section, dict) else {}

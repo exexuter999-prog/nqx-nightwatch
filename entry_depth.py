@@ -58,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CONTRACT_PATH = os.path.join(BASE, "execution_contract.json")
+CONTRACT_PATH = os.path.join(BASE, os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json"))  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
 SECRETS = os.path.join(BASE, ".secrets")
 VERSION = "R86-ENTRY-DEPTH-1"
 TICK = 0.25

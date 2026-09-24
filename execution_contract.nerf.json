@@ -1,0 +1,430 @@
+{
+  "version": "R22-EXECUTION-CONTRACT-1",
+  "intent": {
+    "version": "R18-EXECUTION-INTENT-1"
+  },
+  "claim": {
+    "permanentEntryTombstone": true,
+    "tupleFields": [
+      "scenarioId",
+      "fingerprint",
+      "evidenceHash",
+      "marketCycleId"
+    ],
+    "staleReleaseSec": 900,
+    "staleReleaseRequiresFlatBroker": true,
+    "_maxAgeSecNote": "R41: 30 秒はこのパイプラインでは満たせない。CLAIM の後に order.py の dry-run と live-run(各々 HTTP 数本)が挟まってから CONSUME に届くため、実測で 30 秒を超える。1 監視周期(180 秒)を上限にする。2026-09-01: この節に maxAgeSec が 30 と 180 の**2回**書かれていた。JSON は後勝ちなので実効値は 180 のままだが、先頭の 30 を直しても何も変わらない死んだ行だったので削除した(wrangler の duplicate-object-key 警告の出所)。",
+    "maxAgeSec": 180
+  },
+  "marketOrder": {
+    "_maxPriceAgeSecNote": "R41: 5 秒は構造的に満たせず、成行が全て ENTRY_CLAIM_MARKET_PRICE_STALE で落ちていた(2026-08-25 22:27)。価格の妥当性を守っているのは maxDeviationPoints(供給された last と正本価格の乖離 2pt)であって、この時間予算ではない。パイプラインの実時間に合わせる。",
+    "maxPriceAgeSec": 60,
+    "maxDeviationPoints": 2.0,
+    "actualFillRequiredForOwnership": true,
+    "actualFillTickSize": 0.25,
+    "recalculateRiskFromActualFill": true
+  },
+  "dayguard": {
+    "maxAgeSec": 600
+  },
+  "management": {
+    "version": "R22-MANAGEMENT-INTENT-1",
+    "claimMaxAgeSec": 30
+  },
+  "brokerObservation": {
+    "maxAgeSec": 30,
+    "maxComponentSkewSec": 2,
+    "maxOrders": 16,
+    "futureToleranceSec": 0,
+    "requireSnapshotCas": true,
+    "activeStates": [
+      "WORKING",
+      "ACCEPTED",
+      "SUBMITTED",
+      "PENDING",
+      "PENDING_SUBMIT",
+      "PARTIALLY_FILLED",
+      "PARTIAL_FILL"
+    ],
+    "terminalStates": [
+      "FILLED",
+      "CANCELED",
+      "REJECTED",
+      "EXPIRED"
+    ],
+    "statusByPlatform": {
+      "NT8": {
+        "active": [
+          "WORKING",
+          "ACCEPTED",
+          "SUBMITTED",
+          "PENDING_SUBMIT",
+          "PARTIALLY_FILLED"
+        ],
+        "terminal": [
+          "FILLED",
+          "CANCELED",
+          "REJECTED",
+          "EXPIRED"
+        ]
+      },
+      "TRADOVATE": {
+        "active": [
+          "WORKING",
+          "PENDING",
+          "SUSPENDED",
+          "PARTIALLY_FILLED"
+        ],
+        "terminal": [
+          "FILLED",
+          "CANCELED",
+          "REJECTED",
+          "EXPIRED"
+        ]
+      }
+    }
+  },
+  "ultra": {
+    "enabled": true,
+    "version": "ULTRA-MODE/1",
+    "requiresExplicitMode": true,
+    "maxQtyPerAccount": 100,
+    "maxTotalQty": 300,
+    "maxAccounts": 8,
+    "minQtyPerAccount": 2,
+    "riskCapSource": "ACCOUNT_DRAWDOWN_BUFFER",
+    "maxRiskDollarsPerAccount": 5000.0,
+    "maxRiskDollarsTotal": 12000.0,
+    "splitPlan": {
+      "legCount": 2,
+      "allocation": "PROPORTIONAL",
+      "runnerRemainder": true,
+      "minLegQty": 1
+    }
+  },
+  "routeIdentity": {
+    "source": "BROKER_ORDER_WINDOW",
+    "acceptedLegRequiresOrderIdAndReceipt": true,
+    "responseBodyIdentityOptional": true,
+    "snapshotPerAttempt": true,
+    "derivedReceiptWhenBrokerIssuesNone": true,
+    "derivedReceiptFormat": "PLATFORM:ACCOUNT:ORDER_ID",
+    "replacementBracketRequiresNewPair": true,
+    "perOrderReplacementReceipts": true
+  },
+  "pyramid": {
+    "_note": "R83(2026-09-12 ユーザー決定): 追撃(pyramiding)。保有中に**同方向の新規シグナル**が ARMED になったら建て増す。枚数は ULTRA で**合計建玉**を引き直し、今の枚数との差だけ足す。口座別リスク上限は各エントリー個別ではなく**追撃後の合計建玉**へ掛ける(CrossTrade/Tradovate は同一口座の同方向建玉を 1 本にネッティングするため)。enabled=false の間は一切評価しない。enabled=true でも dryRun=true の間は判定をサイクル注記に出すだけで**送らない**(影運転)。実弾に回すのは dryRun=false にしたときだけ。",
+    "_r84Note": "R84(docs/R84_PYRAMID_TRANCHE_MANAGEMENT.md): 構造トランシェ台帳。追撃はそれ自体が完結した分割ブラケット付きエントリー(加算型)として送り、既存トランシェの OCO には触れない。所有権は枚数の集合照合(lifecycle_quantities)ではなく脚ごとの三状態(OPEN/CLOSED/INCONSISTENT)から期待枚数を導出する。ロールアウトは §11 の M0→M5。dryRun=false は M3(Worker デプロイ + conformance)完了前に立てない。",
+    "enabled": false,
+    "dryRun": true,
+    "trigger": "SAME_SIDE_SIGNAL",
+    "minGrade": "A",
+    "maxAdds": 2,
+    "orderType": "MARKET_ONLY",
+    "minAddQty": 2,
+    "finalTargetPolicy": "LATEST_TRANCHE",
+    "commitSettleAttempts": 8,
+    "commitSettleDelaySec": 0.5
+  },
+  "manualHalt": {
+    "_note": "R82(2026-09-12 ユーザー決定): 設定ファイル側の緊急停止。autotrade=true の間は自律経路の新規 ENTRY・追撃・建玉管理(建値移動/トレール/張り替え)がすべて止まる。環境変数 NQX_AUTOTRADE / NQX_LIVE_ORDERS や武装台帳より**強い** —— 緊急停止が別経路で上書きされては意味がないため。**撤退だけは塞がない**: NQX_AUTOTRADE_KILL=1 の全決済と、人が叩く order.py --flatten は従来どおり通る(出口を消す緊急停止は緊急停止ではない)。管理も止まるので、保有中に立てるとブローカー側 OCO だけが建玉を守る状態になる。",
+    "autotrade": false
+  },
+  "ownershipAttribution": {
+    "_note": "R79(2026-09-12 ユーザー決定): 台帳(凍結 route snapshot)の注文 ID と receipt で身元が取れた脚は nightwatch の所有物とみなす。成行の平均建値が凍結参照価格から不利側へ乖離していても、身元が自前の送信記録で証明されている以上『他人の建玉』ではない。manualHalt=true が緊急停止で、ON の間は R52/R76 の厳格な乖離ゲートへ戻る。身元(orderId/receipt/口座/銘柄/方向/枚数/ブラケット構造)の検査は一切緩めない。",
+    "ledgerBackedOwnership": true,
+    "manualHalt": false
+  },
+  "entryDepth": {
+    "_note": "R86(2026-09-14, docs/R86_ENTRY_DEPTH_AND_STOP_ROOM.md): 押し目を深く取り SL にも同じだけ余裕を持たせる『ブラケットの平行移動』。建値と SL を同じ幅だけ不利方向へ動かすので SL 幅(リスク額・枚数)は変わらず、ターゲット価格も変えない。判定(model/grade/state/decisionId)は元の幾何のまま。対象は建値に構造の錨が無い VP80_REVERSION(建値 = 直近終値)だけ。レベルそのものに建てる BREAKER/TURTLE は深くすると逆選択で悪化し、SL だけ広げるのはどのモデルでも改善しなかったので受け付けない(stopShift は SAME_AS_DEPTH のみ)。mode: OFF=何もしない / SHADOW=発注は変えずバンドル entryDepth に『動かした場合』を記録 / LIVE=公開シナリオの entry/stop を置き換え、evaluation.decision.evidence に記録専用タグ ENTRY_DEPTH_025N を足す。検証は python entry_depth.py --report / --trades(読むだけ)。",
+    "version": "R86-ENTRY-DEPTH-1",
+    "_modeNote": "2026-09-14 ユーザー決定で SHADOW → LIVE。撤退基準は docs/R86 §5(OFF に戻すのはこの 1 値)。",
+    "mode": "OFF",
+    "stopShift": "SAME_AS_DEPTH",
+    "maxDepthPt": 10.0,
+    "rules": [
+      {
+        "case": "VP80_CLOSE_ANCHOR",
+        "models": [
+          "VP80_REVERSION"
+        ],
+        "depthN": 0.25
+      }
+    ]
+  },
+  "stopLogic": {
+    "_note": "R90(2026-09-15, docs/R90_STOP_LOGIC_HOLES.md): 初期 SL の 3 つの穴。きっかけは 09-14 23:26 の BREAKER BUY(VWAP の 10pt 手前の SL が押しの安値で刺さり、その後 +337pt)。vwapClearance: VWAP が SL の近く(withinN×N 以内、VWAP ちょうど・わずか内側も含む)にあれば SL を VWAP の外側 clearN×N へ逃がす(mode OFF / SHADOW=記録のみ / LIVE=置換。60pt 上限・R:R が壊れれば候補は WATCH。SL が変わると decisionId も変わる)。marketStopGuard: 成行に切り替わる周期に、発注時点の価格から SL まで minN×N 未満なら出さない(engine は claim の前に公開価格で、order.py は送信直前に quote で同じ算術。OFF / LIVE)。flipOrigin: BREAKER の SL の錨をブレイク足でなく上昇/下降の起点(安値/高値が切り下がる/切り上がる限り maxBarsBack 本まで遡る)へ(OFF / LIVE。R88 の TURTLE と同じ形で decisionId が変わる)。各節は独立に検証され、壊れた節だけ OFF に倒れる。検証は python stop_logic.py --policy / --report(読むだけ)。",
+    "version": "R90-STOP-LOGIC-1",
+    "_decisionNote": "2026-09-15 再生(監査バンドル 1,223 本、docs/R90 §3): vwapClearance は塊の先頭 +4.4R(65→61 件)・逐次 +4.4R(ゲート込み +14.06 vs +9.71)で全表示で改善 → LIVE。marketStopGuard は全表示で改善(逐次 +2.3R、塞いだ 14 件中 11 件が損切り)→ LIVE。flipOrigin は塊で +4.2R だが逐次で −1.0R(BREAKER を RISK_CAP_EXCEEDED の WATCH に変えるだけで、空いた枠が別の負けで埋まる)→ 実装は残して OFF。戻すのは各 mode の 1 値。",
+    "vwapClearance": {
+      "mode": "OFF",
+      "withinN": 1.0,
+      "clearN": 0.25,
+      "models": [
+        "VP80_REVERSION",
+        "TURTLE_SOUP_REVERSAL",
+        "BREAKER_CONTINUATION",
+        "OTE_FVG_PULLBACK"
+      ]
+    },
+    "marketStopGuard": {
+      "mode": "LIVE",
+      "minN": 1.0
+    },
+    "flipOrigin": {
+      "mode": "OFF",
+      "maxBarsBack": 5
+    },
+    "poolClearance": {
+      "_note": "R103-1(2026-09-15, docs/R103_1_LIQUIDITY_POOL_STOP.md): SL の外側 withinN×N 以内に未回収の流動性プール(スイング高安 / セッション高安 / VAH・VAL / 前日高安)があれば、SL をそのプールの向こう clearN×N へ逃がす。SHADOW は候補に poolStop の監査と記録専用タグを足すだけで、SL・score・grade・decisionId を動かさない。LIVE にすると SL が置き換わり(60pt 上限・R:R が壊れれば WATCH)decisionId も変わる。戻すのは mode の 1 値(OFF で監査ごと止まる)。",
+      "mode": "OFF",
+      "withinN": 1.0,
+      "clearN": 0.25,
+      "kinds": [
+        "SWING_HIGH",
+        "SWING_LOW",
+        "SESSION",
+        "VA_EDGE",
+        "PD_EXTREME"
+      ],
+      "models": [
+        "VP80_REVERSION",
+        "TURTLE_SOUP_REVERSAL",
+        "BREAKER_CONTINUATION",
+        "OTE_FVG_PULLBACK"
+      ]
+    },
+    "restingStopRecheck": {
+      "_note": "R103-1: 指値(ENTRY_RESTING)を保持している周期に、建値→SL の距離が今のノイズ床 minN×N を割っていないか再検査する。寄付き(opensEt)から minutes 以内は max(直前 12 本の中央値, 寄付き以降の確定足の中央値)を使う。SHADOW は台帳へ RESTING_STOP_STALE を 1 行書くだけで、取消も変更も送らない。戻すのは mode の 1 値。",
+      "mode": "OFF",
+      "minN": 1.0,
+      "sessionOpen": {
+        "minutes": 30,
+        "opensEt": [
+          "09:30",
+          "03:00"
+        ]
+      }
+    },
+    "sweepGate": {
+      "_note": "R103-3(2026-09-16, docs/R103_3_SWEEP_GATE.md): 掃引後に入る。元の SL の外側 poolWithinN×N 以内に未回収プールがある候補(= 09-04〜09-15 の実測で勝ち 0/7・負け 6/12 を分けた幾何)だけ、レベルでの初回タッチでは建てず、そのプールを極値が抜けて内側で引けた(奪還)確定足を待つ。通れば SL は掃引極値の向こう sweepStopN×N(不利側 tick)。maxAgeBars を過ぎた奪還は使わない(STALE)。SHADOW は記録タグ(SWEEP_GATE_WOULD_WAIT / WOULD_PASS)と監査 sweepGate だけで、SL・decisionId は動かない。LIVE は PENDING/STALE の候補を WATCH(hardBlockers SWEEP_PENDING / SWEEP_STALE)にし、PASSED は SL を置換(decisionId も変わる)。戻すのは mode の 1 値。",
+      "_modeNote": "2026-09-16: 再生 1,260 本で「掃引後に通った」周期が 0(掃引→奪還の頃には候補が別の幾何になる)。実効は『プールが SL の外側 1N 以内の候補の見送り』で、POOL 単独より逐次 ΣR が低い(+16.5 vs +19.1)。記録のみ(SHADOW)。掃引を起点にする候補は R103-2 変種 6(TURTLE 再有効化 + R88)。",
+      "mode": "OFF",
+      "poolWithinN": 1.0,
+      "sweepStopN": 0.25,
+      "maxAgeBars": 3,
+      "reclaimBars": 2,
+      "kinds": [
+        "SWING_HIGH",
+        "SWING_LOW",
+        "SESSION",
+        "VA_EDGE",
+        "PD_EXTREME"
+      ],
+      "models": [
+        "BREAKER_CONTINUATION",
+        "VP80_REVERSION"
+      ]
+    }
+  },
+  "modelGate": {
+    "_note": "R89(2026-09-14, docs/R89_MODEL_GATE.md): 武装から外すモデル/型。disabled の各行 {model, variant} に当たる候補は評価・記録はするが primary に選ばない(hardBlockers に MODEL_DISABLED / RESTING_LIMIT_DISABLED を付けて WATCH。別モデルが primary になれる)。variant: ALL = そのモデルの候補すべて / RESTING_LIMIT = MSS 確認後にレベルへ先回りする指値(restingLimit。現状 TURTLE_SOUP_REVERSAL だけが持つ)だけ。空配列 = 何も外さない。不正な行は無視されるので、書き換えたら python tests/test_r89_model_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R89-MODEL-GATE-1",
+    "_decisionNote": "2026-09-19 ユーザー決定: **TURTLE_SOUP_REVERSAL の ALL 停止を解除した(復活)。** 2026-09-14 の停止判断を更新したもの。根拠は docs/R121_ICT_STDV.md §11 の A/B/C 比較 —— 同条件の逐次再生(監査バンドル 1358 本)で停止時 ΣR +4.80 → 復活 +6.71(差 +1.92R)、最大 DD −4.97R → −3.97R。利益は**リテスト保持型**から出ており(ΣR −0.12 → +1.88)、先回り指値型は n=2 で ΣR −0.08 と寄与していない。ただしセットアップ単位では −0.42 → −0.74 で符号が逆になり、bootstrap の区間は 0 を跨ぐ(P(improve)=0.49)。**費用は再生に含まれていない。** 他モデルの停止設定は変えていない(disabled は空)。戻すのは {model: TURTLE_SOUP_REVERSAL, variant: ALL} を 1 行足す。2026-09-14 の停止根拠は docs/R89_MODEL_GATE.md §1。",
+    "disabled": [
+      {"model": "TURTLE_SOUP_REVERSAL", "variant": "ALL"},
+      {"model": "OTE_FVG_PULLBACK", "variant": "ALL"}
+    ]
+  },
+  "ictStdv": {
+    "_note": "R121(2026-09-19, docs/R121_ICT_STDV.md): ICT Standard Deviation Projections(TTrades 版)。level(r) = p0 + r*(p1-p0) の固定投影。BUY は p0=下降 manipulation の起点高値 / p1=掃引した安値、SELL は鏡像。**リスク倍率 R でも統計 σ でもない。** アンカー源は既存の確定済み SWEEP チェーン(MSS_CONFIRMED / RETEST_HELD)だけで、モデル名で全 BREAKER/TURTLE へ広げない。アンカー確定後は現値が EQ を通っても方向・p0・p1 を変えない(別の掃引は別 anchorId)。mode は OFF / SHADOW=記録のみ / LIVE=候補の参加判断へ反映。targets.mode は別の段で、LIVE のときだけ投影を既存 model_targets の目標候補へ渡す(最小 R・重複除去・runner 選定は既存規則に任せる)。targets.ratios の既定は -1/-2/-2.5 で、**-4 は観測専用**(runner が不当に遠くなるため。runnerEligible=true と明示比較が要る)。participation.mode も別の段で、到達済み目標と残り値幅を参加判断に使う。投影域へ触れたことをハードブロックにはしない。STDV は方向票を持たない(targetOnly=true / 0 票)ので、投影の健全性は valid ではなく projectionValid で持つ。Entry/SL/枚数/口座別上限/R119/AUTO/所有権/発注前検査は一切変えない。保有中の凍結済み TP/SL も変えない。検証は python tests/test_r121_ict_stdv.py / python replay_ict_stdv.py(読むだけ)。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R121-ICT-STDV-1",
+    "schema": "NQX_ICT_STDV/1",
+    "_decisionNote": "2026-09-19 ユーザー決定: **STDV を利確目標の選択に使う部分を本番で有効にした(mode=LIVE / targets.mode=LIVE / ratios=[-1,-2,-2.5] / runnerEligible=false)。** 損益改善の実証とは分けた採用判断で、「10 セットアップ待ち」は必須条件にしていない。participation は**未実装**なので OFF のまま(LIVE と表示しない)。`-4` の runner 採用も含めない。初期導入(同日の SHADOW)からの差は mode と targets.mode の 2 語だけ。反映前の確認: (1) 実効リスク上限は口座別 RISK_=$200 / 2 枚固定 / SL 50pt を守る —— STDV は Entry/SL/枚数に触れないので |entry-stop| も riskDollars も変わらない(実測 12 周期で最大 SL 幅 31.25pt / $125)。ULTRA 経路でも枚数は runner 脚が支配するのでほぼ動かず(TP1 を 49.5 → 2.0pt にしても 10 → 12 枚)、上限は projected loss で判定するので効き続ける。(2) 目標は最終 decision と凍結プラン(tp1 / finalTarget / legs)まで届く。(3) TP が変われば decisionId も変わる(stdvIdentity が setup_identity へ入る)。(4) 保有建玉の SL/TP・R119・AUTO は不変(autotrade_engine / order.py は STDV を参照しない)。根拠と A/B/C 比較は docs/R121_ICT_STDV.md §11-12。戻すのは mode と targets.mode を OFF にする 2 語。",
+    "mode": "OFF",
+    "targets": {
+      "mode": "OFF",
+      "ratios": [-1.0, -2.0, -2.5],
+      "runnerEligible": false
+    },
+    "participation": {
+      "mode": "OFF"
+    },
+    "params": {
+      "pivotBars": 2,
+      "maxLegBars": 40,
+      "minLegTicks": 8,
+      "minLegNf": 0.5,
+      "maxAgeBars": 120
+    }
+  },
+  "htfTargets": {
+    "_note": "R124(2026-09-21 ユーザー決定で LIVE、SHADOW は省略。docs/R124_HTF_TARGET_FILL.md): 利確目標が 2 本揃わない候補にだけ、確定した上位足の水準(前日高安・前週高安・未回収の日足スイング・1h/4h の 20 本レンジ高安)を目標候補として足して引き直す。揃っている候補の目標・Entry・SL・枚数・decisionId は変えない。mode は OFF / LIVE。戻しは mode を OFF にする 1 語。",
+    "mode": "OFF",
+    "sources": ["PREV_DAY", "PREV_WEEK", "DAILY_SWING", "RANGE20_1H", "RANGE20_4H"]
+  },
+  "limitGate": {
+    "_note": "R119(2026-09-19, docs/R119_LIMIT_GATE.md): **新規武装だけ**に掛かる 2 つの門。保有建玉の管理(凍結プランの MODIFY / FLATTEN / 追撃)はこの節を一切読まない。gapCap: 発注時に LIMIT になる候補(建値が現値の先)について |現値-建値|/リスク幅 = gapR が maxGapR を超えたら primary に選ばない。MARKET になる候補(建値が現値を通過している)には掛けない —— 指値専用の向き判定で成行候補を落とさないため、判定は autotrade_engine._entry_order_type と同じ式を使う。targetPassed: 現値が既に TP1 に到達/通過している候補を新規武装しない(BUY は 現値 >= tp1、SELL は 現値 <= tp1。向きを区別する)。どちらも鮮度確認済みの現値(bundle.price と priceAt が scenario.maxAgeSec 以内)でだけ判定し、確認できない周期は掛けずに理由を limitGate.reason に残す(相場データの古さは pipeline が先に BLOCK する)。mode: OFF / SHADOW=記録のみ / LIVE=primary から外す(hardBlockers に LIMIT_GAP_EXCEEDED / TARGET_ALREADY_PASSED を付けて WATCH。別モデルが primary になれる)。SL も建値も書き換えないので decisionId は変わらない。書き換えたら python tests/test_r119_limit_gate.py で検証する。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R119-LIMIT-GATE-1",
+    "_decisionNote": "2026-09-19 ユーザー決定: gapCap は既存の msnr_gate.LIMIT_MAX_GAP_R と同じ 1.5 で LIVE、targetPassed も LIVE。1.0 への引き締め・一律成行化・BREAKER 全停止は保留。根拠と実測(標本 40 指値・BREAKER 19 シグナル)は docs/R119_LIMIT_GATE.md。戻すのは各節の mode を OFF にする 1 語。",
+    "gapCap": {
+      "mode": "LIVE",
+      "maxGapR": 1.5,
+      "models": [
+        "VP80_REVERSION",
+        "TURTLE_SOUP_REVERSAL",
+        "BREAKER_CONTINUATION",
+        "OTE_FVG_PULLBACK"
+      ]
+    },
+    "targetPassed": {
+      "mode": "LIVE"
+    }
+  },
+  "structureContext": {
+    "_note": "R122(2026-09-19, docs/R122_STRUCTURE_CONTEXT_AND_PARTICIPATION.md): 多層構造文脈(親の仮説 / 子の構造 / 親子関係)と参加判断。段は 5 つとも独立で、それぞれ OFF / SHADOW / LIVE に戻せる。context: 親の仮説を作って記録する(LIVE = participation の入力になる)。親の出所は直接取得した確定 15 分足 snapshot.bars15m、無ければ既存 htfContext(45m/1h/4h/1d の確定足要約)。3 分足から上位足を合成しない。participation: 候補ごとの参加状態(ENTRY_READY / WAIT_FOR_PULLBACK / WAIT_FOR_CONFIRMATION / NO_ROOM / INVALIDATED / EXPIRED / CONTEXT_UNAVAILABLE)を decision と凍結プランへ残す。LIVE のときだけ PARENT_THESIS_INVALIDATED を hardBlockers に足すが、**その親に依存する候補(同方向で HTF_ALIGNED が効いている継続、およびこの層が作った追加候補)だけ**に限定する。逆方向の独立したセットアップは止めない。shallowCandidate: 深い押しが来ない場面で、子の確認済み構造の後にできた適格 FVG へ指値で参加する代替候補(§4.2)。同じ方向に発注できる候補が既にあるときは作らない。SHADOW は記録だけで primary にならない。selection: 高得点の WATCH 候補が同じ周期の ARMED 候補より先に primary になる現行契約を、ARMED 優先へ変える段(監査 1,359 本で 15 周期が該当)。nearTerm: 次の 1 本 / 5 本の確定 3 分足に対する方向(3 分 / 15 分)。**表示・評価専用で LIVE にできない** —— 未校正の予測を武装ゲートにしないため、LIVE は検証器とテストが拒否する。Entry/SL/枚数/口座別上限/AUTO/所有権/発注前検査/保有建玉の凍結プランは一切変えない。Python 側(msnr_gate)だけで完結し、Worker のデプロイは不要。",
+    "version": "R122-STRUCTURE-CONTEXT-1",
+    "schema": "NQX_STRUCTURE_CONTEXT/1",
+    "_decisionNote": "2026-09-19: context=LIVE / participation=LIVE / shallowCandidate=SHADOW / selection=OFF / nearTerm=SHADOW。根拠は docs/R122_STRUCTURE_CONTEXT_AND_PARTICIPATION.md §8 の A/B/C/D/E 比較(監査バンドル 1,358 本 + 直接取得した 15 分足がある 118 本)。(1) OFF は HEAD と decision・候補・summary が 1,359 本すべてでバイト一致。(2) B(全段 SHADOW)は注文意図の変化 0 件。(3) C(context+participation LIVE)も注文意図の変化 0 件 —— PARENT_THESIS_INVALIDATED は「親の時間足の確定終値が保護水準を抜けた」ときだけ、しかも**同じ方向の候補だけ**に掛かる fail-closed のガードで、この 2 コーパスでは 1 度も発火していない(武装を増やす経路は無い)。効果は「根拠(thesisId / participationState / triggerEvidenceIds / invalidation / relation / orderIntent)が decision と凍結プランに残ること」と、15 分足が入る本番で親の否定が効くこと。(4) D(浅い代替候補)は**逐次 ΣR が +7.71 → +6.71(−1.00R)、最大 DD −3.97 → −4.97R、セットアップ単位 −0.047R/setup、区間 [−0.08,−0.02] が 0 を跨がない**ので LIVE にしない。実装・配線・試験は完了しているので SHADOW(記録のみ)で残す。(5) selection(高得点 WATCH より ARMED を優先)は逐次 +8.91R(A 比 +1.20R)だがセットアップ単位は −0.009R/setup で区間が 0 を跨ぎ、同じ周期で建てる**方向が反転**しうる。該当は 1,358 本中 28 周期。人の判断を待って OFF のまま。戻すのは各段の mode を OFF にする 1 語。費用は再生に含まれていない。",
+    "context": {
+      "mode": "OFF"
+    },
+    "participation": {
+      "mode": "OFF"
+    },
+    "shallowCandidate": {
+      "mode": "OFF"
+    },
+    "selection": {
+      "_note": "R122 選択層(2026-09-20 採用、docs/R122_SELECTION_STAGE.md)。msnr_gate.select_primary は (等級, 点数, TP1 の R, モデル順位) だけで並べ、`allowed`(既存ゲートを全部通ったか)を見ないので、候補固有の理由で WATCH になった高得点候補が、同じ周期の武装できる候補を隠していた(監査 1,358 周期で 15 周期・重複をまとめて 14 件)。LIVE にすると並べ替えの**後**に『hardBlockers がゼロの候補を優先する』1 行が入る。選べるのは既存のどのゲートも通った候補だけで、市場全体・口座全体の停止(ボラ床・High イベント窓・限月満期・取得受領書・手動 HALT・AUTO・建玉照会)は primary を選んだ**後**に当たるので迂回できない。隠していた理由は実測で全件が候補固有(GLOBAL 0/15)。",
+      "_decisionNote": "2026-09-20: OFF → LIVE。費用込み(FEE_PER_SIDE $0.50/枚/片道 = 往復 0.50pt 相当)の逐次再生で、滑り 0/1/2 tick のどれでも改善(ΣR +7.29→+9.42 / +6.87→+8.94 / +6.45→+8.45)、最大 DD は不変(−4.07/−4.18/−4.29R)。変わるのは 15 周期で全部が WATCH→ARMED(逆は 0)、うち 13 周期は建てる方向が反転する。decisionId 単位は +0.056R/件・区間 [−0.09,+0.21] が 0 を跨ぐので**優位は未確定**。2026-09-20 の Codex レビュー(docs/reports/R122_SELECTION_REVIEW_2026-09-20.md)で逐次再生の 3 件の欠陥(武装前の初出時刻で占有判定 / 指値の待ち時間を占有に数えない / WATCH 周期の TP を流用)を直して測り直した結果、ΣR の差(+2.13/+2.06/+2.00R)と最大 DD 不変は変わらなかったが、**差 +2.06R のうち +2.62R が 1 トレードで、それを除くと −0.56R** と分かった。—— 採用理由は損益ではなく『成立していない候補が成立している候補を隠す』選択層の欠陥を直すことで、全体停止(ボラ床・イベント窓・限月・取得受領書・手動 HALT・AUTO・建玉照会)は 7 条件 × reconcile 実行で注文 0 件を確認済み(tests/test_r122_global_stop_no_order.py、陽性対照つき)。戻すのは mode を OFF にする 1 語。",
+      "mode": "OFF"
+    },
+    "nearTerm": {
+      "mode": "OFF",
+      "_liveForbidden": "未校正の短期予測を武装ゲートにしない(§3)。LIVE は verify_r122_live.py と tests/test_r122_structure_context.py が拒否する。"
+    },
+    "params": {
+      "maxPlans": 6
+    }
+  },
+  "fillWatch": {
+    "_note": "R91(2026-09-15, docs/R91_FILL_WATCH_REALTIME.md): 約定監視 fill_watch.py の常駐と照会間隔。**訂正(R118, 2026-09-19 実接続)**: ここには『CrossTrade の Tradovate 口座は REST のみ(WebSocket は NinjaTrader 8 口座だけ、約定のプッシュ通知も無い)』と書いてあったが誤りで、Tradovate 口座も positions/orders/executions をプッシュする(受信フレームはレート枠を消費しない)。出所の切替は gateway.mode。REST で回している間は、上限(利用者ごと毎秒 3 回・溜め 20 回、REST と WebSocket で共有、超過は 429)の中で照会を詰める。autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっていれば切り離したプロセスとして起動し直す(単一インスタンス、出力は .secrets/fill_watch.log)。fastIntervalSec = 建玉がある間の間隔 / idleIntervalSec = FLAT の間隔 / maxRequestsPerSec = fill_watch 自身の上限(ループの照会と送信後照会の分を残す。FLAT の照会は裏取りで 2 本) / rateLimitBackoffSec = 429 を見たら空ける秒数。ループの reconcile 中は照会しない。",
+    "version": "R91-FILL-WATCH-1",
+    "_decisionNote": "2026-09-15 ユーザー決定で autostart=true(nqx_cycle が止まった fill_watch を毎周期起動し直す)。止めるときは false にしてからプロセスを止める(pid は .secrets/fill_watch_heartbeat.json)。",
+    "autostart": true,
+    "fastIntervalSec": 1.5,
+    "idleIntervalSec": 45.0,
+    "maxRequestsPerSec": 1.0,
+    "rateLimitBackoffSec": 15.0
+  },
+  "gateway": {
+    "_note": "R118(2026-09-19, docs/R118_GATEWAY_INTEGRATION.md): ブローカー観測の出所と、口座をまたぐ送信の調停。mode は OFF(従来どおり REST だけ) / SHADOW(答えは REST、裏で Gateway も読んで食い違いを .secrets/gateway_divergence.jsonl へ記録) / LIVE(答えは Gateway、口座ごとに VERIFIED かつ brokerObservation.maxAgeSec 以内でなければその口座だけ REST へ落ちる)。R91 の fillWatch の説明にある『CrossTrade の WebSocket は NinjaTrader 8 口座だけ』は 2026-09-19 の実接続で誤りと判明した(Tradovate 口座も positions/orders/executions をプッシュする)。Gateway は注文を送らない —— 送信は従来どおり order.py の全ゲートを通る。sendVerification=true にすると order.py の送信前後の検証も Gateway を正本にするが、押し込みのストリームを『送った証拠』に使うことになるので既定は false。",
+    "version": "R118-GATEWAY-1",
+    "_autostartNote": "autostart=true のとき nqx_cycle が毎周期 heartbeat を見て、止まっている常駐を切り離したプロセスとして起動し直す(broker_gateway.supervise / spawn_detached、出力は .secrets/broker_gateway.log、単一インスタンスは .secrets/broker_gateway.lock)。**既定 false** —— 接続は CrossTrade の利用者あたり 1 本で、人が手で張った接続を周期が勝手に切ると、切られた側は気づかない。mode=OFF の間は autostart=true でも起動しない(観測に Gateway を使っていないので、常駐させる意味が無い)。緊急停止は NQX_GATEWAY_AUTOSTART=0(契約より強い)。起動して 3 回続けて heartbeat が出なければ 1 時間止めて .secrets/broker_gateway.log を見てもらう。",
+    "_liveDecisionNote": "2026-09-20 ユーザー決定: 観測(mode=LIVE)・常駐の自動起動(autostart)・送信前後の検証(sendVerification)・口座別レーン(coordinator.enabled)をまとめて有効化した。並列数 6・レート予算・既存の安全ゲートは変更していない。有効化の前に確認したのは docs/R118_GATEWAY_INTEGRATION.md §12H(全口座の建玉ゼロ・未約定注文ゼロ・名簿と accountId の一致・Gateway 単一起動・7 口座すべて鮮度内 VERIFIED・REST と Gateway の照合 14 件一致)。戻しは NQX_GATEWAY_MODE=OFF / NQX_GATEWAY_AUTOSTART=0 / NQX_COORDINATOR=0(いずれも契約より強い)か、この 4 つの値を元へ。",
+    "mode": "LIVE",
+    "autostart": true,
+    "sendVerification": true,
+    "coordinator": {
+      "_note": "実行 Coordinator(execution_coordinator.py)。enabled=false の間は engine が従来どおり order.py を 1 回だけ呼ぶ(--accounts に全口座)。true にすると order.py の中で口座を maxParallel 本のレーンへ分けて同時に走らせる(ENTRY の claim は 1 プロセスで 1 回しか消費できないので、口座をプロセスへ分けることはできない)。口座内は必ず直列 —— TP1 → RUNNER の順序が脚 identity 束縛の根拠。",
+      "_budgetNote": "commsBudget は CrossTrade の利用者あたり上限。公式(crosstrade.io/docs/api/rate-limiting, 2026-09-19 確認)は『All API requests, whether over HTTP or WebSocket, share a single rate-limit budget of 3 requests per second』で、対象として挙がっているのは HTTP REST(/v1/api/*)と WebSocket RPC。**送信の webhook(/v1/send/...)はこのページに一度も出てこない。** よって予算は api 側だけで数え、send 側は別に数える(sendCountsAgainstApiBudget=null = 未確認)。ここを true に変える根拠は、CrossTrade からの回答か本番での実測のどちらか。推測で埋めない。",
+      "enabled": true,
+      "maxParallel": 6,
+      "commsBudget": {
+        "requestsPerSec": 3.0,
+        "burst": 20,
+        "reserveForObservation": 2,
+        "sendCountsAgainstApiBudget": null
+      },
+      "perAccountRequests": {
+        "_note": "1 口座あたりの本数。api = 上限の対象と確認できている /v1/api/* への照会。send = /v1/send/ への送信。2026-09-19 に模擬ブローカーで ENTRY の全経路を数えた内訳(1 口座あたり): 送信前の FLAT 検証 2 本(R41 の単数/複数の裏取りで 2 本)+ 送信前の窓(注文一覧 1・約定履歴 1)2 本 + 脚ごとの identity 束縛 2 本 = api 6 本、送信 2 本。**api 6 本は最良の場合**で、注文行がすぐ現れない周期は identity 束縛が NQX_IDENTITY_SETTLE_ATTEMPTS(既定 8)まで再照会するので、最悪 1 口座 20 本になりうる(2026-09-04 実測で行が出るまで 0.5〜1.3 秒)。Gateway で identity と検証を押し込みから取ると api は gatewayApi 本まで落ちる —— ENTRY は 1 本(約定履歴の窓 _fills_snapshot。executionUpdate の行を持っていないので REST のまま)、MODIFY/FLATTEN は 0 本。2026-09-19 に模擬で実測(照会 15 本 → 0 本。ただしこの測定に _fills_snapshot は含めていない)。",
+        "ENTRY": {"api": 6, "send": 2, "gatewayApi": 1},
+        "ENTRY_WORST": {"api": 20, "send": 2, "gatewayApi": 1},
+        "MODIFY": {"api": 4, "send": 1, "gatewayApi": 0},
+        "FLATTEN": {"api": 3, "send": 1, "gatewayApi": 0}
+      }
+    }
+  },
+  "accountMode": {
+    "kind": "MIRRORED",
+    "maxAccounts": null
+  },
+  "contract": {
+    "_note": "R102(2026-09-15, docs/R102_CONTRACT_ROLL_GUARD.md): 取引限月の正本。symbol は発注先(CrossTrade)の限月コード、tvSymbol は TradingView の同じ限月(連続足 MNQ1! は禁止。チャートが別限月なら tv_snapshot が CHART_SYMBOL_MISMATCH で BLOCK)。expiry は最終取引日(第 3 金曜)。満期まで lastEntryDaysBeforeExpiry 日未満は新規 ENTRY を出さない(管理・撤退は止めない)。next はロール先。ロールは FLAT のときに人が docs/CONTRACT_ROLL_CHECKLIST.md の順で行う(NQX_SYMBOL を持つ env / wrangler.toml / monitor_config.json も同時に変え、python contract.py --status を緑にする)。2026-09-15 15:10 に MNQ1! が 12 月限へロールした値で 9 月限へ 285pt 上の通過指値が飛び、裸建玉になった。",
+    "version": "R102-CONTRACT-1",
+    "symbol": "MNQZ6",
+    "tvSymbol": "CME_MINI:MNQZ2026",
+    "expiry": "2026-12-18",
+    "lastEntryDaysBeforeExpiry": 3,
+    "next": {
+      "symbol": "MNQH7",
+      "tvSymbol": "CME_MINI:MNQH2027",
+      "expiry": "2027-03-19"
+    },
+    "priceProvenance": {
+      "_note": "実装で判明: TradingView CLI/MCP の quote は銘柄引数を無視してアクティブチャートの終値を返すので、発注先限月の quote との basis 比較は常に 0pt で無意味。代わりに価格の出所(チャート銘柄)を全消費点で検査する: tv_snapshot(CHART_SYMBOL_*)、engine の fresh quote(別銘柄は不採用)、order.py(--price-symbol / quote symbol / LAST_PRICE_DIVERGENT)。lastDivergencePt は --last と送信直前 quote の許容乖離(env NQX_LAST_DIVERGENCE_PT)。",
+      "lastDivergencePt": 40
+    },
+    "nakedRepair": {
+      "_note": "R102: 所有した建玉に保護注文の OCO 組が 0 なら同じ周期で SL/TP を 1 組で張る(--modify --repair-naked)か、置けなければ FLATTEN。mode: OFF / SHADOW(注記だけ) / LIVE。graceSec は約定直後に子行が見えない猶予。env NQX_NAKED_REPAIR で一時上書き。",
+      "mode": "LIVE",
+      "graceSec": 30
+    },
+    "_rollNote": "2026-09-15 17:40 JST: MNQ1! が MNQZ2026 を指したので MNQU6 -> MNQZ6 へロール(ユーザー指示)。次は 2027-03-19 満期の MNQH7。"
+  },
+  "market": {
+    "maxAgeSec": 600,
+    "futureToleranceSec": 60
+  },
+  "scenario": {
+    "maxAgeSec": 600,
+    "allowedGrades": ["A+"],
+    "allowedStates": [
+      "ARMED",
+      "ACTIVE"
+    ]
+  },
+  "cvd": {
+    "timestampRequiredForAPlus": true,
+    "maxAgeSec": 600,
+    "missingTimestampCap": "A",
+    "retryRequired": true
+  },
+  "risk": {
+    "pointValue": 2.0,
+    "maxQty": 2,
+    "fixedQty": 2,
+    "defaultCapDollars": 240.0,
+    "accountPrefix": "RISK_"
+  },
+  "splitPlan": {
+    "requiredForEntry": true,
+    "targetCount": 2,
+    "legCount": 2,
+    "legQty": 1,
+    "planVersionRequired": true
+  },
+  "session": {
+    "endField": "sessionEndAt"
+  },
+  "blockingOrderStates": [
+    "PENDING",
+    "SENT",
+    "UNKNOWN",
+    "PARTIAL",
+    "ENTRY_PARTIAL_ROUTE",
+    "ENTRY_PARTIAL_FILL",
+    "ENTRY_RESTING"
+  ],
+  "openPositionStates": [
+    "OPEN",
+    "PARTIAL",
+    "EXIT_PENDING"
+  ],
+  "_nerf": {
+    "edition": "NERF",
+    "since": "2026-09-24",
+    "_note": "🩹 Nerf Edition(補助輪版)の契約。nqx_cycle をプログラムとして起動すると NQX_EXECUTION_CONTRACT でこのファイルが読まれる。エッジ層は OFF、等級は A+ だけ、亀は冬眠中。フルパワー版は作者の PC の中だけ。NERF.md 参照。"
+  }
+}

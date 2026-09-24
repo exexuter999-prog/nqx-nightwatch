@@ -27,6 +27,9 @@ R51 で **取得そのもの**もこの中へ入れた。以前はエージェ�
 終了コード: 0=publish 済み / 1=BLOCKED（このサイクルは見送り）/ 2=HALT。
 """
 from __future__ import annotations
+import os as _os  # 🩹 Nerf Edition(NERF.md): プログラムとして起動した周期はナーフ契約で走る。
+if __name__ == "__main__":  # import された試験・道具は本来の契約のまま
+    _os.environ.setdefault("NQX_EXECUTION_CONTRACT", "execution_contract.nerf.json")
 
 import argparse
 import json
@@ -338,6 +341,13 @@ def report_line(cycle: Dict[str, Any], published: bool, extra: str = "",
         parts.append("post-gate state unread — showing pipeline decision")
     if extra:
         parts.append(extra)
+    # 🩹 Nerf Edition: この版がどれだけ弱いかを毎周期自己申告する(NERF.md)。印だけで判定には触れない。
+    try:
+        import nerf
+        if nerf.active():
+            parts.append(nerf.power_suffix())
+    except Exception:  # noqa: BLE001 — 印のために周期を止めない
+        pass
     return " | ".join(parts)
 
 
@@ -696,6 +706,12 @@ def run_cycle(*, dry: bool, force_window: bool, replay: bool,
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # 🩹 Nerf Edition: 起動のたびに補助輪版であることを名乗る(NERF.md)。
+    try:
+        import nerf
+        print(nerf.banner())
+    except Exception:  # noqa: BLE001 — 印のために周期を止めない
+        pass
     parser = argparse.ArgumentParser(description="R13 監視サイクルを1コマンドで回す")
     parser.add_argument("--dry", action="store_true",
                         help="publish 直前で止める（送信も通知もしない）")

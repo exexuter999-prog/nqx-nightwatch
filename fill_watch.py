@@ -71,7 +71,7 @@ HEARTBEAT_PATH = BASE / ".secrets" / "fill_watch_heartbeat.json"
 INSTANCE_LOCK_PATH = BASE / ".secrets" / "fill_watch.lock"
 SPAWN_STATE_PATH = BASE / ".secrets" / "fill_watch_spawn.json"
 LOG_PATH = BASE / ".secrets" / "fill_watch.log"
-CONTRACT_PATH = BASE / "execution_contract.json"
+CONTRACT_PATH = BASE / os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json")  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
 #: ``autotrade_engine.LEDGER_FILE + ".lock"`` と同じ場所(ループの reconcile ロック)。
 RECONCILE_LOCK_PATH = BASE / ".secrets" / "autotrade_ledger.jsonl.lock"
 #: 足の出所。検証済み bundle を優先し、無ければ取得直後の bundle。

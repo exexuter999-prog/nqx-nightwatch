@@ -18,6 +18,9 @@ Telegram Bot → order.py → CrossTrade → Tradovate
 
 依存: 標準ライブラリのみ(order.py と同じ方針)
 """
+import os as _os  # 🩹 Nerf Edition(NERF.md): プログラムとして起動した周期はナーフ契約で走る。
+if __name__ == "__main__":  # import された試験・道具は本来の契約のまま
+    _os.environ.setdefault("NQX_EXECUTION_CONTRACT", "execution_contract.nerf.json")
 import argparse, hashlib, json, math, os, re, subprocess, sys, time
 import urllib.request
 import uuid, urllib.parse, urllib.error

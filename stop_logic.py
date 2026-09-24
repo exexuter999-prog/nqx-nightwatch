@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CONTRACT_PATH = os.path.join(BASE, "execution_contract.json")
+CONTRACT_PATH = os.path.join(BASE, os.environ.get("NQX_EXECUTION_CONTRACT", "execution_contract.json"))  # 🩹 Nerf Edition: NQX_EXECUTION_CONTRACT で差し替え可
 VERSION = "R90-STOP-LOGIC-1"
 TICK = 0.25
 MODES3 = ("OFF", "SHADOW", "LIVE")
